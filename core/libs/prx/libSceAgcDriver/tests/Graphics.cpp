@@ -2021,6 +2021,15 @@ void multisampleTests() {
     setCmaskAddress(queue, 1);
     auto pass = DecodeColorMetadataPass(queue);
     Require(pass.has_value() && pass->mode == ColorMetadataPass::Mode::Resolve && pass->source.has_value() && pass->source->samples == 2 && pass->targets.size() == 1 && pass->targets[0].samples == 1, "a CB resolve of a multisampled target did not decode");
+    const auto rasterizedResolve = queue;
+    queue.context[0x2f8] = 0;
+    pass = DecodeColorMetadataPass(queue);
+    Require(pass.has_value() && pass->mode == ColorMetadataPass::Mode::Resolve && pass->source.has_value() && pass->source->samples == 2 && pass->targets.size() == 1, "a CB resolve with a single-sample rasterizer did not take its sample count from the source target");
+    queue = rasterizedResolve;
+    queue.context[0x2f8] = 0x00200002;
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0x622ae6aeu;
+    expectFailure([&] { DecodeColorMetadataPass(queue); }, "differs from the rasterizer's");
+    queue = rasterizedResolve;
     queue.context[0x32b] = queue.context[0x31c] ^ (1u << 8u);
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "different formats or extents");
     queue = multisampled();
