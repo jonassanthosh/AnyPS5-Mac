@@ -310,8 +310,7 @@ std::string Emitter::ReadVector(const DecodedInstruction& decoded, int index, co
 
 std::string Emitter::CallTo(const std::string& target, std::uint64_t returnAddress) const {
     return "c->gpr[Rsp] -= 8; StStack<u64>(c->gpr[Rsp], " + Absolute(returnAddress) + "); out(); " + target +
-        " in(); if (g->returnTarget != " + Absolute(returnAddress) + ") [[unlikely]] { ReturnMismatch(g, " +
-        Absolute(returnAddress) + "); }";
+        " in(); if (g->returnTarget != " + Absolute(returnAddress) + ") [[unlikely]] goto L_unwind;";
 }
 
 std::map<std::uint64_t, std::vector<Emitter::FlagMask>> Emitter::ComputeLiveFlags(
@@ -386,7 +385,7 @@ void Emitter::Emit(const std::vector<std::ostream*>& shards) {
     }
     std::vector<bool> covered(executableEnd > executableStart ? executableEnd - executableStart : 0);
     for (auto* out : shards) {
-        *out << "#include \"translator/Semantics.hpp\"\n#include \"translator/Runtime.hpp\"\n\n"
+        *out << "#include \"translator/SemanticsVector.hpp\"\n#include \"translator/Runtime.hpp\"\n\n"
              << "using namespace translator;\n\n";
         for (const auto& [entry, function] : _program.functions) {
             *out << "void " << FunctionName(entry) << "(GuestContext* __restrict g);\n";
@@ -458,7 +457,7 @@ void Emitter::EmitFunction(std::ostream& out, const TranslatedFunctionInfo& func
     for (int i = 0; i < 16; ++i) {
         if ((usedVector >> i) & 1) out << " std::memcpy(c->ymm[" << i << "], g->ymm[" << i << "], 32);";
     }
-    out << " c->cf = g->cf; c->pf = g->pf; c->af = g->af; c->zf = g->zf; c->sf = g->sf; c->of = g->of; c->df = g->df; };\n";
+    out << " c->cf = g->cf; c->pf = g->pf; c->af = g->af; c->zf = g->zf; c->sf = g->sf; c->of = g->of; c->df = g->df; c->mxcsr = g->mxcsr; };\n";
     out << "    auto out = [&]() __attribute__((always_inline)) {";
     for (int i = 0; i < 16; ++i) {
         if ((writtenGpr >> i) & 1) out << " g->gpr[" << i << "] = c->gpr[" << i << "];";
@@ -466,9 +465,27 @@ void Emitter::EmitFunction(std::ostream& out, const TranslatedFunctionInfo& func
     for (int i = 0; i < 16; ++i) {
         if ((writtenVector >> i) & 1) out << " std::memcpy(g->ymm[" << i << "], c->ymm[" << i << "], 32);";
     }
-    out << " g->cf = c->cf; g->pf = c->pf; g->af = c->af; g->zf = c->zf; g->sf = c->sf; g->of = c->of; g->df = c->df; };\n";
+    out << " g->cf = c->cf; g->pf = c->pf; g->af = c->af; g->zf = c->zf; g->sf = c->sf; g->of = c->of; g->df = c->df; g->mxcsr = c->mxcsr; };\n";
     out << "    in();\n";
+    out << "    const u64 frameEntryRsp = c->gpr[Rsp];\n";
     out << "    goto L_" << HexName(function.entry) << ";\n";
+    std::vector<std::uint64_t> resumePoints;
+    for (const auto& [start, block] : function.blocks) {
+        for (const auto& decoded : block.instructions) {
+            if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_CALL && function.blocks.count(decoded.Next()) != 0) {
+                resumePoints.push_back(decoded.Next());
+            }
+        }
+    }
+    out << "L_unwind:\n";
+    if (!resumePoints.empty()) {
+        out << "    if (c->gpr[Rsp] < frameEntryRsp) {\n      switch (g->returnTarget - c->imageBase) {\n";
+        for (auto point : resumePoints) {
+            out << "      case " << Hex(point) << ": goto L_" << HexName(point) << ";\n";
+        }
+        out << "      default: break;\n      }\n    }\n";
+    }
+    out << "    out();\n    return;\n";
     for (const auto& [start, block] : function.blocks) {
         out << "L_" << HexName(start) << ":\n";
         const auto& masks = liveAfter[start];
@@ -516,7 +533,10 @@ bool Emitter::EmitInstruction(std::ostream& out, const TranslatedFunctionInfo& f
     if (EmitInteger(out, decoded, liveAfter & written)) {
         return true;
     }
-    return EmitVector(out, decoded);
+    if (EmitVector(out, decoded)) {
+        return true;
+    }
+    return EmitVectorExtended(out, decoded);
 }
 
 bool Emitter::EmitControl(std::ostream& out, const TranslatedFunctionInfo& function, const BasicBlock& block,
@@ -1474,10 +1494,13 @@ bool Emitter::EmitVector(std::ostream& out, const DecodedInstruction& decoded) {
             ReadVector(decoded, vex ? 2 : 1, type) + ")") << "\n";
         return true;
     }
-    case ZYDIS_MNEMONIC_PMOVZXBW: case ZYDIS_MNEMONIC_PMOVZXBD: case ZYDIS_MNEMONIC_PMOVZXWD: case ZYDIS_MNEMONIC_PMOVZXDQ:
-    case ZYDIS_MNEMONIC_PMOVSXBW: case ZYDIS_MNEMONIC_PMOVSXBD: case ZYDIS_MNEMONIC_PMOVSXWD: case ZYDIS_MNEMONIC_PMOVSXDQ:
+    case ZYDIS_MNEMONIC_PMOVZXBW: case ZYDIS_MNEMONIC_PMOVZXDQ:
+    case ZYDIS_MNEMONIC_PMOVSXBW: case ZYDIS_MNEMONIC_PMOVSXWD: case ZYDIS_MNEMONIC_PMOVSXDQ:
     case ZYDIS_MNEMONIC_VPMOVZXBW: case ZYDIS_MNEMONIC_VPMOVZXBD: case ZYDIS_MNEMONIC_VPMOVZXWD: case ZYDIS_MNEMONIC_VPMOVZXDQ:
-    case ZYDIS_MNEMONIC_VPMOVSXBW: case ZYDIS_MNEMONIC_VPMOVSXBD: case ZYDIS_MNEMONIC_VPMOVSXWD: case ZYDIS_MNEMONIC_VPMOVSXDQ: {
+    case ZYDIS_MNEMONIC_VPMOVSXBW: case ZYDIS_MNEMONIC_VPMOVSXBD: case ZYDIS_MNEMONIC_VPMOVSXWD: case ZYDIS_MNEMONIC_VPMOVSXDQ:
+    case ZYDIS_MNEMONIC_PMOVZXBQ: case ZYDIS_MNEMONIC_PMOVZXWQ: case ZYDIS_MNEMONIC_PMOVSXBQ: case ZYDIS_MNEMONIC_PMOVSXWQ:
+    case ZYDIS_MNEMONIC_VPMOVZXBQ: case ZYDIS_MNEMONIC_VPMOVZXWQ: case ZYDIS_MNEMONIC_VPMOVSXBQ: case ZYDIS_MNEMONIC_VPMOVSXWQ:
+    case ZYDIS_MNEMONIC_PMOVZXBD: case ZYDIS_MNEMONIC_PMOVSXBD: case ZYDIS_MNEMONIC_PMOVZXWD: {
         std::string name = Mnemonic(instruction);
         if (name[0] == 'v') name = name.substr(1);
         bool sign = name[4] == 's';
@@ -1584,8 +1607,9 @@ bool Emitter::EmitVector(std::ostream& out, const DecodedInstruction& decoded) {
     case ZYDIS_MNEMONIC_MOVMSKPD:
     case ZYDIS_MNEMONIC_PMOVMSKB:
     case ZYDIS_MNEMONIC_VMOVMSKPS:
+    case ZYDIS_MNEMONIC_VMOVMSKPD:
     case ZYDIS_MNEMONIC_VPMOVMSKB: {
-        std::string helper = instruction.mnemonic == ZYDIS_MNEMONIC_MOVMSKPD ? "MoveMask64"
+        std::string helper = (instruction.mnemonic == ZYDIS_MNEMONIC_MOVMSKPD || instruction.mnemonic == ZYDIS_MNEMONIC_VMOVMSKPD) ? "MoveMask64"
             : (instruction.mnemonic == ZYDIS_MNEMONIC_MOVMSKPS || instruction.mnemonic == ZYDIS_MNEMONIC_VMOVMSKPS) ? "MoveMask32"
             : "MoveMask8";
         out << "    " << Write(decoded, 0, helper + "<" + std::to_string(operands[1].size / 8) + ">(c, " +
@@ -1679,6 +1703,460 @@ bool Emitter::EmitVector(std::ostream& out, const DecodedInstruction& decoded) {
     default:
         return false;
     }
+}
+
+
+bool Emitter::EmitVectorExtended(std::ostream& out, const DecodedInstruction& decoded) {
+    const auto& instruction = decoded.instruction;
+    const auto& operands = decoded.operands;
+    for (int i = 0; i < instruction.operand_count; ++i) {
+        if (operands[i].type == ZYDIS_OPERAND_TYPE_REGISTER && ZydisRegisterGetClass(operands[i].reg.value) == ZYDIS_REGCLASS_MMX) {
+            return false;
+        }
+    }
+    const bool vex = IsVex(instruction);
+    const int visible = instruction.operand_count_visible;
+    const std::string mnemonic = Mnemonic(instruction);
+    const std::string base = vex && mnemonic[0] == 'v' ? mnemonic.substr(1) : mnemonic;
+    const int s1 = vex ? 1 : 0;
+    const int s2 = vex ? 2 : 1;
+    const unsigned bits = operands[0].size;
+    auto isRegister = [&](int index) { return operands[index].type == ZYDIS_OPERAND_TYPE_REGISTER; };
+    auto isMemory = [&](int index) { return operands[index].type == ZYDIS_OPERAND_TYPE_MEMORY; };
+    auto vreg = [&](int index) { return std::to_string(VectorIndex(operands[index].reg.value)); };
+    auto imm = [&](int index) { return static_cast<unsigned>(operands[index].imm.value.u); };
+    auto writeFull = [&](const std::string& type, const std::string& value) {
+        return "WriteVec<" + type + ">(c, " + vreg(0) + ", " + value + ", " + (vex ? "true" : "false") + ");";
+    };
+    auto source = [&](int index, const std::string& type, unsigned bytes) {
+        if (isMemory(index)) {
+            return "[&]{ " + type + " v{}; std::memcpy(&v, (const void*)" + Address(decoded, operands[index]) + ", " +
+                std::to_string(bytes) + "); return v; }()";
+        }
+        return "ReadVec<" + type + ">(c, " + vreg(index) + ")";
+    };
+    auto lanes = [](const std::vector<unsigned>& indices) {
+        std::ostringstream text;
+        for (std::size_t i = 0; i < indices.size(); ++i) text << (i ? ", " : "") << indices[i];
+        return text.str();
+    };
+    auto floatType = [](bool doubles) { return std::string(doubles ? "f64" : "f32"); };
+    auto scalarMerge = [&](const std::string& element, const std::string& value) {
+        return "{ Vec<u8, 16> merged = ReadVec<Vec<u8, 16>>(c, " + vreg(s1) + "); " + element + " r = " + value +
+            "; std::memcpy(&merged, &r, sizeof(r)); " + writeFull("Vec<u8, 16>", "merged") + " }";
+    };
+
+    if (base == "permilps" || base == "permilpd") {
+        const bool doubles = base == "permilpd";
+        auto type = VectorType(floatType(doubles), bits);
+        if (operands[visible - 1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+            const auto control = imm(visible - 1);
+            std::vector<unsigned> indices;
+            const unsigned count = bits / (doubles ? 64 : 32);
+            for (unsigned i = 0; i < count; ++i) {
+                if (doubles) indices.push_back(i / 2 * 2 + ((control >> i) & 1));
+                else indices.push_back(i / 4 * 4 + ((control >> (2 * (i % 4))) & 3));
+            }
+            out << "    { " << type << " s = " << source(1, type, bits / 8) << "; "
+                << writeFull(type, "__builtin_shufflevector(s, s, " + lanes(indices) + ")") << " }\n";
+            return true;
+        }
+        auto controlType = VectorType(doubles ? "i64" : "i32", bits);
+        out << "    " << writeFull(type, "PermuteWithinLanes(" + source(1, type, bits / 8) + ", " + source(2, controlType, bits / 8) +
+            ", " + (doubles ? "true" : "false") + ")") << "\n";
+        return true;
+    }
+    if (base == "movshdup" || base == "movsldup" || base == "movddup") {
+        const bool doubles = base == "movddup";
+        if (doubles && bits == 128) {
+            out << "    { u64 v = " << (isMemory(1) ? "Ld<u64>(" + Address(decoded, operands[1]) + ")" : "ReadVec<u64>(c, " + vreg(1) + ")")
+                << "; " << writeFull("Vec<u64, 16>", "(Vec<u64, 16>){v, v}") << " }\n";
+            return true;
+        }
+        auto type = VectorType(doubles ? "u64" : "u32", bits);
+        std::vector<unsigned> indices;
+        const unsigned count = bits / (doubles ? 64 : 32);
+        for (unsigned i = 0; i < count; ++i) indices.push_back(base == "movshdup" ? (i | 1) : (i & ~1u));
+        out << "    { " << type << " s = " << source(1, type, bits / 8) << "; "
+            << writeFull(type, "__builtin_shufflevector(s, s, " + lanes(indices) + ")") << " }\n";
+        return true;
+    }
+    if (base == "shufpd") {
+        auto type = VectorType("u64", bits);
+        const auto control = imm(visible - 1);
+        const unsigned count = bits / 64;
+        std::vector<unsigned> indices;
+        for (unsigned i = 0; i < count; ++i) indices.push_back((i % 2 == 0 ? 0 : count) + i / 2 * 2 + ((control >> i) & 1));
+        out << "    " << writeFull(type, "__builtin_shufflevector(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) +
+            ", " + lanes(indices) + ")") << "\n";
+        return true;
+    }
+    if (base == "pshuflw" || base == "pshufhw") {
+        auto type = VectorType("u16", bits);
+        const auto control = imm(visible - 1);
+        const bool low = base == "pshuflw";
+        std::vector<unsigned> indices;
+        for (unsigned i = 0; i < bits / 16; ++i) {
+            const unsigned lane = i / 8 * 8;
+            const unsigned position = i % 8;
+            if ((low && position < 4) || (!low && position >= 4)) indices.push_back(lane + (low ? 0 : 4) + ((control >> (2 * (position % 4))) & 3));
+            else indices.push_back(i);
+        }
+        out << "    { " << type << " s = " << source(1, type, bits / 8) << "; "
+            << writeFull(type, "__builtin_shufflevector(s, s, " + lanes(indices) + ")") << " }\n";
+        return true;
+    }
+    if (base == "permps" || base == "permd") {
+        out << "    " << writeFull("Vec<u32, 32>", "PermuteAcrossLanes(" + source(2, "Vec<u32, 32>", 32) + ", " +
+            source(1, "Vec<u32, 32>", 32) + ")") << "\n";
+        return true;
+    }
+    if (base == "broadcastf128" || base == "broadcasti128") {
+        std::vector<unsigned> indices;
+        for (unsigned i = 0; i < 32; ++i) indices.push_back(i % 16);
+        out << "    { Vec<u8, 16> s = " << source(1, "Vec<u8, 16>", 16) << "; "
+            << writeFull("Vec<u8, 32>", "__builtin_shufflevector(s, s, " + lanes(indices) + ")") << " }\n";
+        return true;
+    }
+    if (base == "insertps") {
+        const auto control = imm(visible - 1);
+        const int from = vex ? 2 : 1;
+        std::string value = isMemory(from) ? "Ld<u32>(" + Address(decoded, operands[from]) + ")"
+                                           : "ReadVec<Vec<u32, 16>>(c, " + vreg(from) + ")[" + std::to_string(control >> 6) + "]";
+        out << "    { Vec<u32, 16> r = ReadVec<Vec<u32, 16>>(c, " << vreg(s1) << "); r[" << ((control >> 4) & 3) << "] = " << value << ";";
+        for (unsigned i = 0; i < 4; ++i) {
+            if ((control >> i) & 1) out << " r[" << i << "] = 0;";
+        }
+        out << " " << writeFull("Vec<u32, 16>", "r") << " }\n";
+        return true;
+    }
+    if (base == "extractps" || base == "pextrb" || base == "pextrw" || base == "pextrd" || base == "pextrq") {
+        const unsigned elementBits = base == "pextrb" ? 8 : base == "pextrw" ? 16 : base == "pextrq" ? 64 : 32;
+        const unsigned count = 128 / elementBits;
+        const auto element = UnsignedType(elementBits);
+        out << "    " << Write(decoded, 0, "(u64)ReadVec<" + VectorType("u" + std::to_string(elementBits), 128) + ">(c, " + vreg(1) +
+            ")[" + std::to_string(imm(visible - 1) & (count - 1)) + "]") << "\n";
+        (void)element;
+        return true;
+    }
+    if (base == "pinsrb" || base == "pinsrw" || base == "pinsrd" || base == "pinsrq") {
+        const unsigned elementBits = base == "pinsrb" ? 8 : base == "pinsrw" ? 16 : base == "pinsrq" ? 64 : 32;
+        const unsigned count = 128 / elementBits;
+        const int from = vex ? 2 : 1;
+        auto type = VectorType("u" + std::to_string(elementBits), 128);
+        out << "    { " << type << " r = ReadVec<" << type << ">(c, " << vreg(s1) << "); r[" << (imm(visible - 1) & (count - 1))
+            << "] = (" << UnsignedType(elementBits) << ")" << Read(decoded, from, isMemory(from) ? elementBits : operands[from].size)
+            << "; " << writeFull(type, "r") << " }\n";
+        return true;
+    }
+    if (base == "movlps" || base == "movhps" || base == "movlpd" || base == "movhpd") {
+        const bool high = base == "movhps" || base == "movhpd";
+        if (isMemory(0)) {
+            out << "    St<u64>(" << Address(decoded, operands[0]) << ", ReadVec<Vec<u64, 16>>(c, " << vreg(visible - 1) << ")[" << (high ? 1 : 0)
+                << "]);\n";
+            return true;
+        }
+        const int from = vex ? 2 : 1;
+        out << "    { Vec<u64, 16> r = ReadVec<Vec<u64, 16>>(c, " << vreg(s1) << "); r[" << (high ? 1 : 0) << "] = Ld<u64>("
+            << Address(decoded, operands[from]) << "); " << writeFull("Vec<u64, 16>", "r") << " }\n";
+        return true;
+    }
+    if (base == "cmpps" || base == "cmppd" || base == "cmpss" || base == "cmpsd") {
+        const bool doubles = base.back() == 'd';
+        const bool scalar = base[3] == 's' && (base == "cmpss" || base == "cmpsd");
+        const auto predicate = std::to_string(imm(visible - 1));
+        const std::string element = doubles ? "double" : "float";
+        if (scalar) {
+            std::string b = isMemory(s2) ? "Ld<" + element + ">(" + Address(decoded, operands[s2]) + ")"
+                                         : "ReadVec<" + element + ">(c, " + vreg(s2) + ")";
+            std::string bitsType = doubles ? "u64" : "u32";
+            out << "    " << scalarMerge(bitsType, "ComparePredicate<" + element + ">(ReadVec<" + element + ">(c, " + vreg(s1) + "), " + b +
+                ", " + predicate + ") ? ~(" + bitsType + ")0 : (" + bitsType + ")0") << "\n";
+            return true;
+        }
+        auto type = VectorType(floatType(doubles), bits);
+        out << "    " << writeFull(type, "CompareVector<" + element + ">(" + source(s1, type, bits / 8) + ", " +
+            source(s2, type, bits / 8) + ", " + predicate + ")") << "\n";
+        return true;
+    }
+    if (base == "blendvps" || base == "blendvpd" || base == "pblendvb") {
+        const std::string element = base == "blendvps" ? "u32" : base == "blendvpd" ? "u64" : "u8";
+        const std::string maskElement = base == "blendvps" ? "i32" : base == "blendvpd" ? "i64" : "i8";
+        auto type = VectorType(element, bits);
+        auto maskType = VectorType(maskElement, bits);
+        std::string mask = vex ? source(3, maskType, bits / 8) : "ReadVec<" + maskType + ">(c, 0)";
+        out << "    " << writeFull(type, "BlendBySign(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ", " + mask + ")") << "\n";
+        return true;
+    }
+    if (base == "ptest") {
+        auto type = VectorType("u64", operands[0].size);
+        out << "    { " << type << " a = " << source(0, type, operands[0].size / 8) << "; " << type << " b = "
+            << source(1, type, operands[0].size / 8) << "; u64 z = 0, k = 0; for (int i = 0; i < " << operands[0].size / 64
+            << "; ++i) { z |= a[i] & b[i]; k |= ~a[i] & b[i]; } c->zf = z == 0; c->cf = k == 0; c->of = c->sf = c->af = c->pf = 0; }\n";
+        return true;
+    }
+    if (base == "maskmovps" || base == "pmaskmovd" || base == "pmaskmovq" || base == "maskmovpd") {
+        const bool quads = base == "pmaskmovq" || base == "maskmovpd";
+        const std::string element = quads ? "u64" : "u32";
+        const std::string maskElement = quads ? "i64" : "i32";
+        if (isMemory(0)) {
+            const unsigned size = operands[2].size;
+            out << "    MaskedStore(" << Address(decoded, operands[0]) << ", ReadVec<" << VectorType(maskElement, size) << ">(c, " << vreg(1)
+                << "), ReadVec<" << VectorType(element, size) << ">(c, " << vreg(2) << "));\n";
+            return true;
+        }
+        out << "    " << writeFull(VectorType(element, bits), "MaskedLoad<" + VectorType(element, bits) + ">(" + Address(decoded, operands[2]) +
+            ", ReadVec<" + VectorType(maskElement, bits) + ">(c, " + vreg(1) + "))") << "\n";
+        return true;
+    }
+    if (base == "dpps") {
+        auto type = VectorType("f32", bits);
+        out << "    " << writeFull(type, "DotProduct128(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ", " +
+            std::to_string(imm(visible - 1)) + "u)") << "\n";
+        return true;
+    }
+    if (base == "haddps" || base == "haddpd" || base == "hsubps" || base == "hsubpd" || base == "phaddd" || base == "phaddw" || base == "phsubd") {
+        const std::string element = base == "haddpd" || base == "hsubpd" ? "f64" : base == "phaddw" ? "i16" : base[0] == 'p' ? "i32" : "f32";
+        auto type = VectorType(element, bits);
+        const bool subtract = base.find("sub") != std::string::npos;
+        out << "    " << writeFull(type, "HorizontalAdd(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ", " +
+            (subtract ? "true" : "false") + ")") << "\n";
+        return true;
+    }
+    if (base == "addsubps" || base == "addsubpd") {
+        auto type = VectorType(floatType(base == "addsubpd"), bits);
+        out << "    " << writeFull(type, "AddSubtract(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "roundps" || base == "roundpd") {
+        auto type = VectorType(floatType(base == "roundpd"), bits);
+        out << "    " << writeFull(type, "RoundVector(" + source(1, type, bits / 8) + ", " + std::to_string(imm(visible - 1)) + "u)") << "\n";
+        return true;
+    }
+    if (base == "roundss" || base == "roundsd" || base == "sqrtss" || base == "rsqrtss" || base == "rcpss") {
+        const bool doubles = base == "roundsd";
+        const std::string element = doubles ? "double" : "float";
+        std::string b = isMemory(s2) ? "Ld<" + element + ">(" + Address(decoded, operands[s2]) + ")" : "ReadVec<" + element + ">(c, " + vreg(s2) + ")";
+        std::string value = base == "rsqrtss" ? "1.0f / std::sqrt(" + b + ")" : base == "rcpss" ? "1.0f / " + b
+            : "RoundScalar(" + b + ", " + std::to_string(imm(visible - 1)) + "u)";
+        out << "    " << scalarMerge(element, value) << "\n";
+        return true;
+    }
+    if (base == "sqrtps" || base == "sqrtpd" || base == "rsqrtps" || base == "rcpps") {
+        auto type = VectorType(floatType(base == "sqrtpd"), bits);
+        const std::string helper = base == "rsqrtps" ? "ReciprocalSqrt" : base == "rcpps" ? "Reciprocal" : "SqrtVector";
+        out << "    " << writeFull(type, helper + "(" + source(1, type, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "cvtps2pd" || base == "cvtdq2pd") {
+        const std::string from = base == "cvtps2pd" ? "float" : "i32";
+        const unsigned count = bits / 64;
+        out << "    { Vec<" << from << ", 16> s = " << source(1, "Vec<" + from + ", 16>", count * 4) << "; Vec<double, " << bits / 8
+            << "> r; for (int i = 0; i < " << count << "; ++i) r[i] = (double)s[i]; " << writeFull("Vec<double, " + std::to_string(bits / 8) + ">", "r")
+            << " }\n";
+        return true;
+    }
+    if (base == "cvtpd2ps" || base == "cvttpd2dq" || base == "cvtpd2dq") {
+        const unsigned sourceBits = operands[1].size;
+        const unsigned count = sourceBits / 64;
+        const bool toInt = base != "cvtpd2ps";
+        const std::string to = toInt ? "i32" : "float";
+        const std::string convert = base == "cvttpd2dq" ? "CvtF64ToI32(s[i])" : base == "cvtpd2dq" ? "CvtRoundF64ToI32(s[i])" : "(float)s[i]";
+        out << "    { Vec<double, " << sourceBits / 8 << "> s = " << source(1, "Vec<double, " + std::to_string(sourceBits / 8) + ">", sourceBits / 8)
+            << "; Vec<" << to << ", 16> r{}; for (int i = 0; i < " << count << "; ++i) r[i] = " << convert << "; "
+            << "WriteVec<Vec<" << to << ", 16>>(c, " << vreg(0) << ", r, true); }\n";
+        return true;
+    }
+    if (base == "cvtps2dq") {
+        auto from = VectorType("f32", bits);
+        auto to = VectorType("i32", bits);
+        out << "    " << writeFull(to, "ConvertRoundToInt32<" + to + ">(" + source(1, from, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "cvtsd2si" || base == "cvtss2si") {
+        const std::string element = base == "cvtsd2si" ? "double" : "float";
+        std::string value = isMemory(1) ? "Ld<" + element + ">(" + Address(decoded, operands[1]) + ")" : "ReadVec<" + element + ">(c, " + vreg(1) + ")";
+        out << "    " << Write(decoded, 0, "CvtRoundF64ToI" + std::to_string(bits) + "((double)" + value + ")") << "\n";
+        return true;
+    }
+    if (base == "cvtph2ps") {
+        const unsigned sourceBytes = bits / 16;
+        out << "    { Vec<u16, " << (sourceBytes < 16 ? 16 : sourceBytes) << "> s = " << source(1, "Vec<u16, " + std::to_string(sourceBytes < 16 ? 16 : sourceBytes) + ">", sourceBytes)
+            << "; auto wide = HalfToFloat(s); Vec<float, " << bits / 8 << "> r; for (int i = 0; i < " << bits / 32
+            << "; ++i) r[i] = wide[i]; " << writeFull("Vec<float, " + std::to_string(bits / 8) + ">", "r") << " }\n";
+        return true;
+    }
+    if (base == "cvtps2ph") {
+        const unsigned sourceBits = operands[1].size;
+        const unsigned count = sourceBits / 32;
+        out << "    { auto h = FloatToHalf(ReadVec<Vec<float, " << sourceBits / 8 << ">>(c, " << vreg(1) << ")); ";
+        if (isMemory(0)) {
+            out << "std::memcpy((void*)" << Address(decoded, operands[0]) << ", &h, " << count * 2 << "); }\n";
+        } else {
+            out << "Vec<u16, 16> r{}; for (int i = 0; i < " << count << "; ++i) r[i] = h[i]; WriteVec<Vec<u16, 16>>(c, " << vreg(0) << ", r, true); }\n";
+        }
+        return true;
+    }
+    static const std::map<std::string, std::pair<std::string, std::string>> saturating = {
+        {"paddsb", {"i8", "false"}}, {"paddsw", {"i16", "false"}}, {"psubsb", {"i8", "true"}}, {"psubsw", {"i16", "true"}},
+        {"paddusb", {"u8", "false"}}, {"paddusw", {"u16", "false"}}, {"psubusb", {"u8", "true"}}, {"psubusw", {"u16", "true"}},
+    };
+    if (auto it = saturating.find(base); it != saturating.end()) {
+        auto type = VectorType(it->second.first, bits);
+        out << "    " << writeFull(type, "SaturatingAdd(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ", " +
+            it->second.second + ")") << "\n";
+        return true;
+    }
+    if (base == "pavgb" || base == "pavgw") {
+        auto type = VectorType(base == "pavgb" ? "u8" : "u16", bits);
+        out << "    " << writeFull(type, "AverageRounded(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "psadbw") {
+        auto type = VectorType("u8", bits);
+        out << "    " << writeFull(VectorType("u64", bits), "SumAbsoluteDifferences(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "pmulhw") {
+        auto type = VectorType("i16", bits);
+        out << "    " << writeFull(type, "MultiplyHighSigned(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "pmuldq") {
+        auto type = VectorType("i32", bits);
+        out << "    " << writeFull(VectorType("i64", bits), "MultiplyEvenSigned(" + source(s1, type, bits / 8) + ", " + source(s2, type, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "pminuw" || base == "pmaxuw" || base == "pminsb" || base == "pmaxsb" || base == "pminub" || base == "pmaxub") {
+        const std::string element = base.back() == 'w' ? "u16" : base[4] == 's' ? "i8" : "u8";
+        auto type = VectorType(element, bits);
+        const std::string op = base.substr(1, 3) == "min" ? "min" : "max";
+        out << "    { " << type << " a = " << source(s1, type, bits / 8) << "; " << type << " b = " << source(s2, type, bits / 8) << "; "
+            << writeFull(type, "(" + type + ")" + BinaryExpression(op, "a", "b")) << " }\n";
+        return true;
+    }
+    if (base == "pabsb" || base == "pabsw" || base == "pabsd") {
+        auto type = VectorType(base == "pabsb" ? "i8" : base == "pabsw" ? "i16" : "i32", bits);
+        out << "    " << writeFull(type, "AbsoluteValue(" + source(1, type, bits / 8) + ")") << "\n";
+        return true;
+    }
+    if (base == "phminposuw") {
+        out << "    " << writeFull("Vec<u16, 16>", "MinimumPosition(" + source(1, "Vec<u16, 16>", 16) + ")") << "\n";
+        return true;
+    }
+    static const std::map<std::string, std::pair<std::string, int>> registerShifts = {
+        {"psllw", {"u16", -1}}, {"pslld", {"u32", -1}}, {"psllq", {"u64", -1}}, {"psrlw", {"u16", 1}}, {"psrld", {"u32", 1}},
+        {"psrlq", {"u64", 1}}, {"psraw", {"i16", 1}}, {"psrad", {"i32", 1}},
+    };
+    if (auto it = registerShifts.find(base); it != registerShifts.end()) {
+        auto type = VectorType(it->second.first, bits);
+        if (operands[visible - 1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+            const unsigned shift = imm(visible - 1);
+            const unsigned elementBits = ElementBits(it->second.first);
+            std::string value = shift >= elementBits
+                ? (it->second.first[0] == 'i' ? "(" + source(s1, type, bits / 8) + " >> " + std::to_string(elementBits - 1) + ")" : "(" + type + "){}")
+                : "(" + source(s1, type, bits / 8) + (it->second.second < 0 ? " << " : " >> ") + std::to_string(shift) + ")";
+            out << "    " << writeFull(type, value) << "\n";
+            return true;
+        }
+        out << "    " << writeFull(type, "ShiftByRegister(" + source(s1, type, bits / 8) + ", " + source(s2, "Vec<u64, 16>", 16) + ", " +
+            std::to_string(it->second.second) + ")") << "\n";
+        return true;
+    }
+    if ((base == "pslldq" || base == "psrldq") && vex) {
+        const unsigned shift = std::min(imm(visible - 1), 16u);
+        const bool left = base == "pslldq";
+        std::vector<unsigned> indices;
+        for (unsigned i = 0; i < bits / 8; ++i) {
+            const unsigned lane = i / 16 * 16;
+            const int position = left ? static_cast<int>(i % 16) - static_cast<int>(shift) : static_cast<int>(i % 16 + shift);
+            indices.push_back(position >= 0 && position < 16 ? lane + position : bits / 8);
+        }
+        auto type = VectorType("u8", bits);
+        out << "    { " << type << " s = " << source(1, type, bits / 8) << "; " << type << " z = {}; "
+            << writeFull(type, "__builtin_shufflevector(s, z, " + lanes(indices) + ")") << " }\n";
+        return true;
+    }
+    if (base == "palignr" && bits == 256) {
+        const unsigned shift = imm(visible - 1);
+        std::vector<unsigned> indices;
+        for (unsigned i = 0; i < 32; ++i) {
+            const unsigned lane = i / 16 * 16;
+            const unsigned position = i % 16 + shift;
+            indices.push_back(position < 16 ? 32 + lane + position : position < 32 ? lane + position - 16 : 64);
+        }
+        out << "    { Vec<u8, 32> high = " << source(1, "Vec<u8, 32>", 32) << "; Vec<u8, 32> low = " << source(2, "Vec<u8, 32>", 32)
+            << "; Vec<u8, 32> z = {}; Vec<u8, 64> both = __builtin_shufflevector(high, low, ";
+        std::vector<unsigned> all;
+        for (unsigned i = 0; i < 64; ++i) all.push_back(i);
+        out << lanes(all) << "); Vec<u8, 64> zeros = __builtin_shufflevector(z, z, " << lanes(all) << "); "
+            << writeFull("Vec<u8, 32>", "__builtin_shufflevector(both, zeros, " + lanes(indices) + ")") << " }\n";
+        return true;
+    }
+    if (base == "movbe") {
+        const unsigned width = operands[0].size;
+        const std::string swap = width == 64 ? "__builtin_bswap64" : width == 32 ? "__builtin_bswap32" : "__builtin_bswap16";
+        out << "    " << Write(decoded, 0, swap + "(" + Read(decoded, 1) + ")") << "\n";
+        return true;
+    }
+    if (base == "bextr") {
+        const auto type = UnsignedType(bits);
+        out << "    { " << type << " s = " << Read(decoded, 1) << "; u32 control = (u32)" << Read(decoded, 2) << "; u32 start = control & 0xff; u32 length = (control >> 8) & 0xff; "
+            << type << " r = start >= " << bits << " ? 0 : (" << type << ")(s >> start); if (length < " << bits << ") r &= (((" << type
+            << ")1 << length) - 1); " << Write(decoded, 0, "r") << " c->zf = r == 0; c->cf = 0; c->of = 0; }\n";
+        return true;
+    }
+    if (base == "cmpxchg16b") {
+        out << "    { u128 expected = ((u128)c->gpr[Rdx] << 64) | c->gpr[Rax]; u128 desired = ((u128)c->gpr[Rcx] << 64) | c->gpr[Rbx]; "
+            << "bool ok = __atomic_compare_exchange_n(&AtomicRef<u128>(" << Address(decoded, operands[0])
+            << "), &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); c->zf = ok; "
+            << "if (!ok) { c->gpr[Rax] = (u64)expected; c->gpr[Rdx] = (u64)(expected >> 64); } }\n";
+        return true;
+    }
+    if (base == "ldmxcsr") {
+        out << "    c->mxcsr = Ld<u32>(" << Address(decoded, operands[0]) << ");\n";
+        return true;
+    }
+    if (base == "stmxcsr") {
+        out << "    St<u32>(" << Address(decoded, operands[0]) << ", c->mxcsr);\n";
+        return true;
+    }
+    if (base == "aesenc" || base == "aesenclast" || base == "aesdec" || base == "aesdeclast") {
+        const bool encrypt = base.find("enc") != std::string::npos;
+        const bool last = base.find("last") != std::string::npos;
+        out << "    " << writeFull("Vec<u8, 16>", std::string(encrypt ? "AesEncrypt(" : "AesDecrypt(") + source(s1, "Vec<u8, 16>", 16) + ", " +
+            source(s2, "Vec<u8, 16>", 16) + ", " + (last ? "true" : "false") + ")") << "\n";
+        return true;
+    }
+    if (base == "aesimc") {
+        out << "    " << writeFull("Vec<u8, 16>", "AesInverseMixColumns(" + source(1, "Vec<u8, 16>", 16) + ")") << "\n";
+        return true;
+    }
+    if (base == "aeskeygenassist") {
+        out << "    " << writeFull("Vec<u32, 16>", "AesKeyGenAssist(" + source(1, "Vec<u32, 16>", 16) + ", " + std::to_string(imm(visible - 1)) + "u)") << "\n";
+        return true;
+    }
+    if (base == "pclmulqdq") {
+        out << "    " << writeFull("Vec<u64, 16>", "CarrylessMultiply(" + source(s1, "Vec<u64, 16>", 16) + ", " + source(s2, "Vec<u64, 16>", 16) + ", " +
+            std::to_string(imm(visible - 1)) + "u)") << "\n";
+        return true;
+    }
+    if (base == "extrq") {
+        std::string length = visible == 3 ? std::to_string(imm(1)) + "u" : "(unsigned)(ReadVec<u64>(c, " + vreg(1) + ") & 0x3f)";
+        std::string index = visible == 3 ? std::to_string(imm(2)) + "u" : "(unsigned)((ReadVec<u64>(c, " + vreg(1) + ") >> 8) & 0x3f)";
+        out << "    { Vec<u64, 16> r{}; r[0] = ExtractField(ReadVec<u64>(c, " << vreg(0) << "), " << length << ", " << index
+            << "); WriteVec<Vec<u64, 16>>(c, " << vreg(0) << ", r, false); }\n";
+        return true;
+    }
+    if (base == "insertq") {
+        std::string length = visible == 4 ? std::to_string(imm(2)) + "u" : "(unsigned)(ReadVec<Vec<u64, 16>>(c, " + vreg(1) + ")[1] & 0x3f)";
+        std::string index = visible == 4 ? std::to_string(imm(3)) + "u" : "(unsigned)((ReadVec<Vec<u64, 16>>(c, " + vreg(1) + ")[1] >> 8) & 0x3f)";
+        out << "    { Vec<u64, 16> r{}; r[0] = InsertField(ReadVec<u64>(c, " << vreg(0) << "), ReadVec<u64>(c, " << vreg(1) << "), " << length
+            << ", " << index << "); WriteVec<Vec<u64, 16>>(c, " << vreg(0) << ", r, false); }\n";
+        return true;
+    }
+    (void)isRegister;
+    return false;
 }
 
 }

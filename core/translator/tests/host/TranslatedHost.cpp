@@ -1,3 +1,4 @@
+#include "translator/GuestJump.hpp"
 #include "translator/Runtime.hpp"
 #include "translator/Semantics.hpp"
 #include <algorithm>
@@ -134,41 +135,13 @@ void HostSum8Import(GuestContext* c) {
     c->gpr[translator::Rax] = static_cast<std::uint64_t>(total);
 }
 
-thread_local std::uint64_t guestComparator = 0;
-
-int CompareThroughGuest(const void* a, const void* b) {
-    auto result = Runtime::Instance().CallGuest(guestComparator,
-        {reinterpret_cast<std::uint64_t>(a), reinterpret_cast<std::uint64_t>(b)});
-    return static_cast<int>(static_cast<std::uint32_t>(result));
+extern "C" void HostQsort(void* base, unsigned long count, unsigned long size, int (*compare)(const void*, const void*)) {
+    std::qsort(base, count, size, compare);
 }
 
-extern "C" void HostQsort(void* base, unsigned long count, unsigned long size, std::uint64_t compare) {
-    auto saved = guestComparator;
-    guestComparator = compare;
-    std::qsort(base, count, size, CompareThroughGuest);
-    guestComparator = saved;
-}
-
-struct GuestThreadStart {
-    std::uint64_t body;
-    std::uint64_t argument;
-};
-
-void* RunGuestThread(void* raw) {
-    auto* start = static_cast<GuestThreadStart*>(raw);
-    try {
-        Runtime::Instance().CallGuest(start->body, {start->argument});
-    } catch (const std::exception& error) {
-        std::fprintf(stderr, "guest thread: %s\n", error.what());
-        std::abort();
-    }
-    delete start;
-    return nullptr;
-}
-
-extern "C" long HostThreadCreate(std::uint64_t body, std::uint64_t argument) {
+extern "C" long HostThreadCreate(void* (*body)(void*), void* argument) {
     pthread_t thread;
-    if (pthread_create(&thread, nullptr, RunGuestThread, new GuestThreadStart{body, argument}) != 0) {
+    if (pthread_create(&thread, nullptr, body, argument) != 0) {
         std::abort();
     }
     return reinterpret_cast<long>(thread);
@@ -200,8 +173,12 @@ int main(int argc, char** argv) {
         runtime.RegisterImport("memset", reinterpret_cast<void*>(static_cast<void* (*)(void*, int, size_t)>(std::memset)));
         runtime.RegisterImport("fmaf", reinterpret_cast<void*>(static_cast<float (*)(float, float, float)>(std::fmaf)));
         runtime.RegisterContextImport("host_printf", HostPrintfImport);
+        for (const auto& [name, handler] : translator::RuntimeContextImports()) {
+            runtime.RegisterContextImport(name, handler);
+        }
         runtime.RegisterContextImport("host_sum8", HostSum8Import);
         runtime.LoadImage(argv[1]);
+        runtime.InstallCallbackBridge();
         auto result = runtime.CallGuest(runtime.SymbolAddress("test_main"), {});
         std::printf("result=%ld\n", static_cast<long>(result));
         if (std::getenv("APS5_TRANSLATOR_STATS") != nullptr) {

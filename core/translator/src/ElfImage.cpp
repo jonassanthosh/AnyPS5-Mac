@@ -130,6 +130,7 @@ ElfImage ElfImage::Load(const std::filesystem::path& path) {
     image._entry = header.entry;
     for (std::uint16_t i = 0; i < header.phnum; ++i) {
         auto ph = ReadAt<Elf64ProgramHeader>(image._bytes, header.phoff + i * sizeof(Elf64ProgramHeader));
+        image._programHeaders.push_back({ph.type, ph.flags, ph.offset, ph.vaddr, ph.paddr, ph.filesz, ph.memsz, ph.align});
         if (ph.type == PtLoad) {
             image._segments.push_back({ph.vaddr, ph.memsz, ph.offset, ph.filesz, ph.flags});
         }

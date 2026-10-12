@@ -147,6 +147,7 @@ TranslatedFunctionInfo Discovery::ExploreFunction(std::uint64_t entry, const std
                 if (auto target = DirectTarget(decoded); target && _image.IsExecutable(*target)) {
                     newEntries.insert(*target);
                 }
+                leaders.insert(decoded.Next());
             }
             if (instruction.mnemonic == ZYDIS_MNEMONIC_LEA) {
                 if (auto target = RipRelativeAddress(decoded, decoded.operands[1]); target && _image.IsExecutable(*target)) {

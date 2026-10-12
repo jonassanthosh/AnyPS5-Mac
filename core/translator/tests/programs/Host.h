@@ -16,6 +16,8 @@ void* memcpy(void* destination, const void* source, size_t size);
 void* memset(void* destination, int value, size_t size);
 long host_clock_ns(void);
 float fmaf(float a, float b, float c);
+int setjmp(long* buffer);
+void longjmp(long* buffer, int value);
 
 long test_main(void);
 

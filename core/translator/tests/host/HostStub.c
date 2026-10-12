@@ -12,3 +12,5 @@ void* memcpy(void* destination, const void* source, size_t size) { return destin
 void* memset(void* destination, int value, size_t size) { return destination; }
 long host_clock_ns(void) { return 0; }
 float fmaf(float a, float b, float c) { return 0; }
+int setjmp(long* buffer) { return 0; }
+void longjmp(long* buffer, int value) {}

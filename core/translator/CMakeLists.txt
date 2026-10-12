@@ -20,9 +20,16 @@ target_include_directories(translator_elf PUBLIC src)
 add_executable(x64a64 src/main.cpp src/Discovery.cpp src/Emitter.cpp)
 target_link_libraries(x64a64 PRIVATE translator_elf Zydis)
 
-add_library(translator_runtime STATIC runtime/src/Runtime.cpp runtime/src/HostCall.S)
+add_library(translator_runtime STATIC runtime/src/Runtime.cpp runtime/src/HostCall.S
+    runtime/src/CallbackBridge.cpp runtime/src/CallbackBridge.S runtime/src/GuestJump.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/src/NidCompute.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/src/Sha1.cpp)
+target_include_directories(translator_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/include)
 target_include_directories(translator_runtime PUBLIC runtime/include)
 target_link_libraries(translator_runtime PUBLIC translator_elf)
+add_library(translator_title_main STATIC runtime/src/TitleMain.cpp)
+target_link_libraries(translator_title_main PUBLIC translator_runtime)
+target_include_directories(translator_title_main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/include)
+
 target_compile_definitions(translator_runtime PUBLIC APS5_TRANSLATOR_TSO=$<BOOL:${APS5_TRANSLATOR_TSO}>
     APS5_TRANSLATOR_VECTOR_TSO=$<BOOL:${APS5_TRANSLATOR_VECTOR_TSO}>)
 
@@ -41,11 +48,15 @@ if(BUILD_TESTING)
 
     function(add_translation_test name source)
         set(variant ${ARGN})
+        set(guestVariant ${variant})
+        if(variant MATCHES "ROSETTA")
+            set(guestVariant ${x86Features})
+        endif()
         set(guestDir ${CMAKE_CURRENT_BINARY_DIR}/guest)
         set(elf ${guestDir}/${name}.elf)
         set(generated ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}.cpp)
         add_custom_command(OUTPUT ${elf}
-            COMMAND ${CMAKE_C_COMPILER} ${guestFlags} ${variant} -c ${CMAKE_CURRENT_SOURCE_DIR}/tests/programs/${source} -o ${guestDir}/${name}.o
+            COMMAND ${CMAKE_C_COMPILER} ${guestFlags} ${guestVariant} -c ${CMAKE_CURRENT_SOURCE_DIR}/tests/programs/${source} -o ${guestDir}/${name}.o
             COMMAND ${CMAKE_C_COMPILER} ${guestLinkFlags} -pie -Wl,-z,norelro -Wl,-e,test_main ${guestDir}/${name}.o ${stubLibrary} -o ${elf}
             DEPENDS tests/programs/${source} tests/programs/Host.h ${stubLibrary}
             VERBATIM)
@@ -59,13 +70,19 @@ if(BUILD_TESTING)
         target_compile_options(${name}_translated PRIVATE -Wno-unused-label -Wno-unused-variable -Wno-unused-value)
         add_executable(${name}_native tests/programs/${source} tests/host/NativeHost.c)
         target_compile_options(${name}_native PRIVATE -O2 -ffp-contract=off)
+        if(variant MATCHES "ROSETTA")
+            set_target_properties(${name}_native PROPERTIES OSX_ARCHITECTURES x86_64)
+            target_compile_options(${name}_native PRIVATE ${x86Features})
+        endif()
         add_test(NAME ${name} COMMAND ${CMAKE_COMMAND}
             -DNATIVE=$<TARGET_FILE:${name}_native> -DTRANSLATED=$<TARGET_FILE:${name}_translated> -DELF=${elf}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/Compare.cmake)
         set_tests_properties(${name} PROPERTIES TIMEOUT 120)
     endfunction()
 
-    foreach(program Integer Float Callbacks Threads Bench)
+    set(x86Features -mavx2 -mfma -mf16c -mbmi -mbmi2 -maes -mpclmul -mmovbe -msse4.2 -mcx16)
+    add_translation_test(Simd Simd.c ROSETTA)
+    foreach(program Integer Float Callbacks Threads Bench Jumps)
         add_translation_test(${program} ${program}.c)
         add_translation_test(${program}Zen2 ${program}.c -march=znver2)
     endforeach()

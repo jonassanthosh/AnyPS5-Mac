@@ -1,6 +1,7 @@
 #include "translator/Runtime.hpp"
 #include "translator/Semantics.hpp"
 #include "ElfImage.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -40,6 +41,17 @@ struct Import {
     ContextImport contextHandler = nullptr;
 };
 
+struct TlsTemplate {
+    std::uint64_t vaddr = 0;
+    std::uint64_t fileSize = 0;
+    std::uint64_t memorySize = 0;
+    std::uint64_t align = 1;
+};
+
+std::uint64_t AlignUp(std::uint64_t value, std::uint64_t alignment) {
+    return alignment <= 1 ? value : (value + alignment - 1) / alignment * alignment;
+}
+
 struct ThreadState {
     std::unique_ptr<GuestContext> context;
     void* stack = nullptr;
@@ -67,6 +79,10 @@ struct Runtime::State {
     std::uint8_t* importRegion = nullptr;
     std::uint64_t importRegionSize = 0;
     std::uint64_t sentinel = 0;
+    ImportResolver resolver;
+    std::vector<ElfProgramHeader> programHeaders;
+    TlsTemplate tls;
+    std::size_t unresolved = 0;
     std::atomic<std::size_t> dispatches{0};
     std::atomic<std::size_t> importCalls{0};
 };
@@ -106,8 +122,43 @@ void Runtime::RegisterDataImport(const std::string& name, void* hostAddress) {
     _state->dataImports[name] = hostAddress;
 }
 
+void Runtime::SetImportResolver(ImportResolver resolver) {
+    _state->resolver = std::move(resolver);
+}
+
+const void* Runtime::ImageProgramHeaders(std::size_t& count) const {
+    count = _state->programHeaders.size();
+    return _state->programHeaders.data();
+}
+
+std::uint64_t Runtime::ImageSize() const {
+    return _state->imageSize;
+}
+
+std::size_t Runtime::UnresolvedImportCount() const {
+    return _state->unresolved;
+}
+
+bool Runtime::IsTranslatedFunction(std::uint64_t address) const {
+    return _state->image != nullptr && address >= ImageBase() && _state->functions.count(address - ImageBase()) != 0;
+}
+
+void* Runtime::NativeImportAt(std::uint64_t address) const {
+    auto region = reinterpret_cast<std::uint64_t>(_state->importRegion);
+    if (address < region || address >= region + _state->imports.size() * ImportStride || (address - region) % ImportStride != 0) {
+        return nullptr;
+    }
+    return _state->imports[(address - region) / ImportStride].hostFunction;
+}
+
 void Runtime::LoadImage(const std::filesystem::path& path) {
     auto elf = ElfImage::Load(path);
+    _state->programHeaders = elf.ProgramHeaders();
+    for (const auto& header : elf.ProgramHeaders()) {
+        if (header.type == 7) {
+            _state->tls = {header.vaddr, header.fileSize, header.memorySize, std::max<std::uint64_t>(header.align, 1)};
+        }
+    }
     _state->imageSize = (elf.ImageSize() + 0xffff) & ~0xffffull;
     void* memory = mmap(nullptr, _state->imageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (memory == MAP_FAILED) {
@@ -143,9 +194,33 @@ void Runtime::LoadImage(const std::filesystem::path& path) {
             } else if (auto data = _state->dataImports.find(symbol.name); data != _state->dataImports.end()) {
                 *slot = reinterpret_cast<std::uint64_t>(data->second) + static_cast<std::uint64_t>(relocation.addend);
             } else if (auto import = _state->importIndex.find(symbol.name); import != _state->importIndex.end()) {
-                *slot = reinterpret_cast<std::uint64_t>(_state->importRegion) + import->second * ImportStride;
+                *slot = reinterpret_cast<std::uint64_t>(_state->importRegion) + import->second * ImportStride +
+                    static_cast<std::uint64_t>(relocation.addend);
             } else {
-                throw std::runtime_error("Unresolved guest import " + symbol.name);
+                const bool data = symbol.type == 1;
+                ImportResolution resolution;
+                if (_state->resolver) {
+                    resolution = _state->resolver(symbol.name, data);
+                }
+                if (resolution.kind == ImportResolution::Kind::Data) {
+                    _state->dataImports[symbol.name] = resolution.address;
+                    *slot = reinterpret_cast<std::uint64_t>(resolution.address) + static_cast<std::uint64_t>(relocation.addend);
+                    break;
+                }
+                if (data) {
+                    throw std::runtime_error("Unresolved guest data import " + symbol.name);
+                }
+                if (resolution.kind == ImportResolution::Kind::Context) {
+                    RegisterContextImport(symbol.name, resolution.handler);
+                } else {
+                    RegisterImport(symbol.name, resolution.address);
+                    _state->unresolved += resolution.kind == ImportResolution::Kind::Missing ? 1 : 0;
+                }
+                if ((_state->imports.size() + 1) * ImportStride >= _state->importRegionSize) {
+                    throw std::runtime_error("Too many guest imports for the import address range");
+                }
+                *slot = reinterpret_cast<std::uint64_t>(_state->importRegion) + (_state->imports.size() - 1) * ImportStride +
+                    static_cast<std::uint64_t>(relocation.addend);
             }
             break;
         }
@@ -188,6 +263,13 @@ GuestContext* Runtime::CurrentContext() {
         context->gpr[Rsp] = context->stackBase + GuestStackSize - 64;
         context->fsBase = reinterpret_cast<std::uint64_t>(state->tls) + TlsBlockSize / 2;
         *reinterpret_cast<std::uint64_t*>(context->fsBase) = context->fsBase;
+        if (_state->tls.memorySize != 0) {
+            const auto size = AlignUp(_state->tls.memorySize, _state->tls.align);
+            if (size > TlsBlockSize / 2) {
+                throw std::runtime_error("Guest TLS block of " + std::to_string(size) + " bytes exceeds the reserved area");
+            }
+            std::memcpy(reinterpret_cast<void*>(context->fsBase - size), _state->image + _state->tls.vaddr, _state->tls.fileSize);
+        }
         context->mxcsr = 0x1f80;
         context->runtime = this;
         currentThread = std::move(state);
@@ -206,6 +288,11 @@ std::uint64_t Runtime::CallGuest(std::uint64_t target, std::initializer_list<std
     for (auto argument : arguments) {
         c->gpr[argumentRegisters[i++]] = argument;
     }
+    return CallGuestWithRegisters(target);
+}
+
+std::uint64_t Runtime::CallGuestWithRegisters(std::uint64_t target) {
+    auto* c = CurrentContext();
     auto savedRsp = c->gpr[Rsp];
     c->gpr[Rsp] = (savedRsp - 128) & ~0xfull;
     c->gpr[Rsp] -= 8;
@@ -226,8 +313,10 @@ void Runtime::Dispatch(GuestContext* c, std::uint64_t target) {
         const auto& import = _state->imports[(target - region) / ImportStride];
         if (import.contextHandler != nullptr) {
             import.contextHandler(c);
-        } else {
+        } else if (import.hostFunction != nullptr) {
             aps5_host_call_sysv(c, import.hostFunction);
+        } else {
+            throw std::runtime_error("Guest called unresolved import " + import.name);
         }
         c->returnTarget = Ld<std::uint64_t>(c->gpr[Rsp]);
         c->gpr[Rsp] += 8;

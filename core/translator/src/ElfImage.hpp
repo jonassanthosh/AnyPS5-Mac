@@ -17,6 +17,17 @@ struct ElfSegment {
     std::uint32_t flags;
 };
 
+struct ElfProgramHeader {
+    std::uint32_t type;
+    std::uint32_t flags;
+    std::uint64_t offset;
+    std::uint64_t vaddr;
+    std::uint64_t paddr;
+    std::uint64_t fileSize;
+    std::uint64_t memorySize;
+    std::uint64_t align;
+};
+
 struct ElfSymbol {
     std::string name;
     std::uint64_t value;
@@ -38,6 +49,7 @@ public:
 
     const std::vector<std::uint8_t>& Bytes() const { return _bytes; }
     const std::vector<ElfSegment>& Segments() const { return _segments; }
+    const std::vector<ElfProgramHeader>& ProgramHeaders() const { return _programHeaders; }
     const std::vector<ElfSymbol>& Symbols() const { return _symbols; }
     const std::vector<ElfSymbol>& DynamicSymbols() const { return _dynamicSymbols; }
     const std::vector<ElfRelocation>& Relocations() const { return _relocations; }
@@ -55,6 +67,7 @@ private:
 
     std::vector<std::uint8_t> _bytes;
     std::vector<ElfSegment> _segments;
+    std::vector<ElfProgramHeader> _programHeaders;
     std::vector<ElfSymbol> _symbols;
     std::vector<ElfSymbol> _dynamicSymbols;
     std::vector<ElfRelocation> _relocations;

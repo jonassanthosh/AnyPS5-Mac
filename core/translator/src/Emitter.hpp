@@ -47,6 +47,7 @@ private:
         const DecodedInstruction& decoded, FlagMask liveAfter);
     bool EmitInteger(std::ostream& out, const DecodedInstruction& decoded, FlagMask liveAfter);
     bool EmitVector(std::ostream& out, const DecodedInstruction& decoded);
+    bool EmitVectorExtended(std::ostream& out, const DecodedInstruction& decoded);
     bool EmitControl(std::ostream& out, const TranslatedFunctionInfo& function, const BasicBlock& block,
         const DecodedInstruction& decoded);
 

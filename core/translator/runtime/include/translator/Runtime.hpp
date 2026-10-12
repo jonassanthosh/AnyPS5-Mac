@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <string>
 
@@ -16,6 +17,15 @@ struct TranslatedEntry {
 };
 
 using ContextImport = void (*)(GuestContext*);
+
+struct ImportResolution {
+    enum class Kind { Missing, Function, Context, Data };
+    Kind kind = Kind::Missing;
+    void* address = nullptr;
+    ContextImport handler = nullptr;
+};
+
+using ImportResolver = std::function<ImportResolution(const std::string& name, bool data)>;
 
 void JumpIndirect(GuestContext* c);
 void CallIndirect(GuestContext* c, std::uint64_t target);
@@ -39,7 +49,15 @@ public:
     void RegisterImport(const std::string& name, void* hostFunction);
     void RegisterContextImport(const std::string& name, ContextImport handler);
     void RegisterDataImport(const std::string& name, void* hostAddress);
+    void SetImportResolver(ImportResolver resolver);
     void LoadImage(const std::filesystem::path& path);
+    const void* ImageProgramHeaders(std::size_t& count) const;
+    std::uint64_t ImageSize() const;
+    std::size_t UnresolvedImportCount() const;
+
+    bool IsTranslatedFunction(std::uint64_t address) const;
+    void* NativeImportAt(std::uint64_t address) const;
+    void InstallCallbackBridge();
 
     std::uint64_t ImageBase() const;
     std::uint64_t EntryAddress() const;
@@ -47,6 +65,7 @@ public:
 
     GuestContext* CurrentContext();
     std::uint64_t CallGuest(std::uint64_t target, std::initializer_list<std::uint64_t> arguments);
+    std::uint64_t CallGuestWithRegisters(std::uint64_t target);
 
     void Dispatch(GuestContext* c, std::uint64_t target);
 
