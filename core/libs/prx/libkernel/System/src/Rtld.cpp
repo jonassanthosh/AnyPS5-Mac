@@ -16,7 +16,11 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include "prx/libc/include/GuestImageRegistry.hpp"
+#else
 #include <link.h>
+#endif
 #endif
 
 namespace {
@@ -35,6 +39,16 @@ const void* imageContaining(const void* address, bool reference, void*& handle, 
         throw std::runtime_error(std::string(caller) + ": address outside every loaded image");
     if (reference) handle = module;
     return module;
+#elif defined(__APPLE__)
+    if (const void* image = GuestImageContaining_nid_no_patch(reinterpret_cast<std::uintptr_t>(address))) return image;
+    Dl_info info{};
+    if (!dladdr(address, &info) || !info.dli_fbase)
+        throw std::runtime_error(std::string(caller) + ": address outside every loaded image");
+    if (reference && info.dli_fname && *info.dli_fname) {
+        handle = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+        if (!handle) throw std::runtime_error(std::string(caller) + ": cannot reference " + info.dli_fname);
+    }
+    return info.dli_fbase;
 #else
     Dl_info info{};
     link_map* image = nullptr;

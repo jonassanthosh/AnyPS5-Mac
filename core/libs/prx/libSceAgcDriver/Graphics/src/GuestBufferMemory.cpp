@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/AtomicSharedPtr.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "ThreadOwned.hpp"
@@ -14,7 +15,9 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#ifdef __linux__
 #include <linux/udmabuf.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -116,7 +119,7 @@ namespace {
 struct RetiredImport;
 
 struct AddressSpaceCache {
-    std::atomic<std::shared_ptr<const GuestBufferMemory::AddressSpace>> current;
+    AtomicSharedPtr<const GuestBufferMemory::AddressSpace> current;
     std::atomic<std::uint64_t> serials{0};
     // Set by the waiter's drop, cleared by the next publish: the rebuild's reason.
     std::atomic<bool> droppedByWaiter{false};
@@ -292,6 +295,7 @@ const char* createHostPointerImport(const Context& context, HostImport& entry, V
 }
 
 #ifndef _WIN32
+#ifdef __linux__
 int udmabufDevice() {
     static const int device = [] {
         const int result = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
@@ -304,19 +308,40 @@ int udmabufDevice() {
     }();
     return device;
 }
+#endif
 
-const char* createDmaBufImport(const Context& context, HostImport& entry, int file, std::uint64_t offset, VkResult& failure) {
+int CreateUdmabuf(int file, std::uint64_t offset, std::uint64_t size, const char*& step) {
+#ifdef __linux__
     udmabuf_create request{};
     request.memfd = static_cast<std::uint32_t>(file);
     request.flags = UDMABUF_FLAGS_CLOEXEC;
     request.offset = offset;
-    request.size = entry.bytes;
+    request.size = size;
     const int device = udmabufDevice();
     const int buffer = device < 0 ? -1 : ioctl(device, UDMABUF_CREATE, &request);
+    if (buffer < 0) step = device < 0 ? "open /dev/udmabuf" : "UDMABUF_CREATE";
+    return buffer;
+#else
+    (void)file;
+    (void)offset;
+    (void)size;
+    static const bool reported = [] {
+        std::fprintf(stderr, "[gpu] udmabuf is not available on this host; shared direct memory is copied instead of imported, and GPU stores through FLAT/GLOBAL addresses do not reach it\n");
+        return true;
+    }();
+    (void)reported;
+    step = "udmabuf, which this host does not have";
+    return -1;
+#endif
+}
+
+const char* createDmaBufImport(const Context& context, HostImport& entry, int file, std::uint64_t offset, VkResult& failure) {
+    const char* created = nullptr;
+    const int buffer = CreateUdmabuf(file, offset, entry.bytes, created);
     close(file);
     if (buffer < 0) {
         failure = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-        return device < 0 ? "open /dev/udmabuf" : "UDMABUF_CREATE";
+        return created;
     }
     VkMemoryFdPropertiesKHR properties{VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
     if (const auto result = context.Function<PFN_vkGetMemoryFdPropertiesKHR>("vkGetMemoryFdPropertiesKHR")(context.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, buffer, &properties); result != VK_SUCCESS) {
@@ -383,16 +408,9 @@ std::shared_ptr<ImportChunk> importChunk(const Context& context, int file, std::
         step = "a chunk past the end of the shared backing";
         return nullptr;
     }
-    udmabuf_create request{};
-    request.memfd = static_cast<std::uint32_t>(file);
-    request.flags = UDMABUF_FLAGS_CLOEXEC;
-    request.offset = index * ImportChunkBytes;
-    request.size = ImportChunkBytes;
-    const int device = udmabufDevice();
-    const int buffer = device < 0 ? -1 : ioctl(device, UDMABUF_CREATE, &request);
+    const int buffer = CreateUdmabuf(file, index * ImportChunkBytes, ImportChunkBytes, step);
     if (buffer < 0) {
         failure = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-        step = device < 0 ? "open /dev/udmabuf" : "UDMABUF_CREATE";
         return nullptr;
     }
     VkMemoryFdPropertiesKHR properties{VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
@@ -1919,6 +1937,10 @@ ImportProbe ProbeDmaBufImportWriteProtection(const Context& context) {
     const std::uint64_t alignment = std::max<std::uint64_t>(context.hostImportAlignment, page);
     const std::uint64_t bytes = (4 * page + alignment - 1) / alignment * alignment;
     probe.pages = static_cast<std::uint32_t>(bytes / page);
+#ifndef __linux__
+    probe.failure = "udmabuf, which this host does not have";
+    return probe;
+#else
     const int file = memfd_create("aps5-dma-buf-import-probe", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (file < 0) {
         probe.failure = "memfd_create";
@@ -1945,6 +1967,7 @@ ImportProbe ProbeDmaBufImportWriteProtection(const Context& context) {
     munmap(mapped, bytes);
     close(file);
     return probe;
+#endif
 #endif
 }
 

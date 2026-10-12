@@ -22,7 +22,12 @@
 #include <filesystem>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include "prx/libc/include/GuestImageRegistry.hpp"
+#include <mach-o/dyld.h>
+#else
 #include <link.h>
+#endif
 #include <mutex>
 #include <unistd.h>
 #include <unordered_map>
@@ -110,12 +115,37 @@ EhFrame::Tables FrameTables(const dl_phdr_info& image, std::uintptr_t header) {
 std::string ImageName(const dl_phdr_info& image) {
     std::string path = image.dlpi_name ? image.dlpi_name : "";
     if (path.empty()) {
+#ifdef __APPLE__
+        if (const void* main = GuestImageMain_nid_no_patch()) {
+            path = GuestImageName_nid_no_patch(main);
+        } else {
+            char executable[4096];
+            std::uint32_t size = sizeof(executable);
+            if (_NSGetExecutablePath(executable, &size) != 0)
+                throw std::runtime_error("sceKernelGetModuleInfoFromAddr: cannot resolve the executable path");
+            path = executable;
+        }
+#else
         char executable[4096];
         const auto length = ::readlink("/proc/self/exe", executable, sizeof(executable) - 1);
         if (length < 0) throw std::runtime_error("sceKernelGetModuleInfoFromAddr: cannot resolve the executable path");
         path.assign(executable, static_cast<std::size_t>(length));
+#endif
     }
     return ModuleName(path.substr(path.find_last_of('/') + 1));
+}
+
+const void* NativeImageAt(std::uintptr_t address) {
+#ifdef __APPLE__
+    if (const void* image = GuestImageContaining_nid_no_patch(address)) return image;
+    Dl_info symbol{};
+    return ::dladdr(reinterpret_cast<const void*>(address), &symbol) ? symbol.dli_fbase : nullptr;
+#else
+    Dl_info symbol{};
+    link_map* native = nullptr;
+    if (!dladdr1(reinterpret_cast<const void*>(address), &symbol, reinterpret_cast<void**>(&native), RTLD_DL_LINKMAP)) return nullptr;
+    return native;
+#endif
 }
 
 template<typename TInfo>
@@ -179,10 +209,8 @@ std::vector<GuestImage> GuestImages() {
     dl_iterate_phdr(CollectGuestImage, &addresses);
     std::vector<GuestImage> images;
     for (const auto address : addresses) {
-        Dl_info symbol{};
-        link_map* native = nullptr;
-        if (!dladdr1(reinterpret_cast<const void*>(address), &symbol, reinterpret_cast<void**>(&native), RTLD_DL_LINKMAP) || !native)
-            throw std::runtime_error("sceKernelGetModuleList: no link map for a loaded image");
+        const void* native = NativeImageAt(address);
+        if (!native) throw std::runtime_error("sceKernelGetModuleList: no link map for a loaded image");
         images.push_back({native, address});
     }
     return images;
@@ -355,10 +383,8 @@ int APS5_VABI sceKernelGetModuleInfoFromAddr(std::uint64_t address, int flags, M
 #ifdef _WIN32
     if (!Fill(static_cast<std::uintptr_t>(address), result)) return SCE_KERNEL_ERROR_ESRCH;
 #else
-    Dl_info symbol{};
-    link_map* native = nullptr;
-    if (!dladdr1(reinterpret_cast<const void*>(address), &symbol, reinterpret_cast<void**>(&native), RTLD_DL_LINKMAP) || !native)
-        return SCE_KERNEL_ERROR_ESRCH;
+    const void* native = NativeImageAt(static_cast<std::uintptr_t>(address));
+    if (!native) return SCE_KERNEL_ERROR_ESRCH;
     ImageSearch<ModuleInfoEx> search{static_cast<std::uintptr_t>(address), &result, false};
     dl_iterate_phdr(FindImage<ModuleInfoEx>, &search);
     if (!search.found) return SCE_KERNEL_ERROR_ESRCH;

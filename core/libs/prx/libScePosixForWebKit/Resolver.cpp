@@ -115,6 +115,12 @@ GuestResolver::HostEntry* APS5_VABI gethostbyname_nid_postfix(const char* name) 
             *sceNetErrnoLoc() = error == WSAHOST_NOT_FOUND ? 1 : error == WSATRY_AGAIN ? 2 : error == WSANO_DATA ? 4 : 3;
             return nullptr;
         }
+#elif defined(__APPLE__)
+        if (!numeric) native = ::gethostbyname(name);
+        if (!native) {
+            *sceNetErrnoLoc() = h_errno == HOST_NOT_FOUND ? 1 : h_errno == TRY_AGAIN ? 2 : h_errno == NO_DATA ? 4 : 3;
+            return nullptr;
+        }
 #else
         std::vector<char> buffer;
         int hostError = 0;

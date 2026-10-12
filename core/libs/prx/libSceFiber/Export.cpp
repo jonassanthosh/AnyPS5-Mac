@@ -10,7 +10,9 @@
 #include <thread>
 #include <stdexcept>
 #include <string>
+#if defined(__x86_64__)
 #include <xmmintrin.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -200,6 +202,7 @@ static void UnpinStack(const void* context, std::uint64_t bytes) {
 extern "C" void Aps5FiberSwitchStack_nid_no_patch(void** save, void* load);
 extern "C" void Aps5FiberTrampoline_nid_no_patch();
 
+#if defined(__x86_64__)
 asm(R"(
     .text
     .globl Aps5FiberSwitchStack_nid_no_patch
@@ -237,6 +240,15 @@ Aps5FiberTrampoline_nid_no_patch:
     ud2
     .size Aps5FiberTrampoline_nid_no_patch, .-Aps5FiberTrampoline_nid_no_patch
 )");
+#else
+extern "C" void Aps5FiberSwitchStack_nid_no_patch(void**, void*) {
+    throw std::runtime_error("sceFiber: switching guest stacks needs the translator's guest context on this architecture");
+}
+
+extern "C" void Aps5FiberTrampoline_nid_no_patch() {
+    throw std::runtime_error("sceFiber: switching guest stacks needs the translator's guest context on this architecture");
+}
+#endif
 
 struct InitialFrame {
     std::uint32_t mxcsr;
@@ -278,10 +290,15 @@ static void PrepareInitialStack(Fiber* fiber) {
     const auto top = reinterpret_cast<std::uintptr_t>(fiber->context + fiber->contextSize) & ~static_cast<std::uintptr_t>(15);
     auto* frame = reinterpret_cast<InitialFrame*>(top - 256);
     std::memset(frame, 0, sizeof(*frame));
+#if defined(__x86_64__)
     frame->mxcsr = _mm_getcsr();
     std::uint16_t control = 0;
     asm volatile("fnstcw %0" : "=m"(control));
     frame->fpuControl = control;
+#else
+    frame->mxcsr = 0x1f80;
+    frame->fpuControl = 0x37f;
+#endif
     frame->r12 = reinterpret_cast<std::uint64_t>(fiber);
     frame->returnAddress = reinterpret_cast<std::uint64_t>(&Aps5FiberTrampoline_nid_no_patch);
     fiber->savedStack = frame;

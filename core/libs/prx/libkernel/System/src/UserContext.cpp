@@ -5,10 +5,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 extern "C" int APS5_VABI sigprocmask_nid_postfix(int how, const void* set, void* previousSet);
+
+#if defined(__x86_64__)
 
 namespace {
 
@@ -217,3 +222,12 @@ int APS5_VABI setcontext_nid_postfix(const UserUcontext* context) {
 }
 
 }
+#else
+extern "C" int APS5_VABI getcontext_nid_postfix(UserUcontext*) {
+    throw std::runtime_error("getcontext: capturing guest registers needs the translator's guest context on this architecture");
+}
+
+extern "C" int APS5_VABI setcontext_nid_postfix(const UserUcontext*) {
+    throw std::runtime_error("setcontext: restoring guest registers needs the translator's guest context on this architecture");
+}
+#endif

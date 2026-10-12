@@ -18,7 +18,11 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include "prx/libc/include/GuestImageRegistry.hpp"
+#else
 #include <link.h>
+#endif
 #endif
 
 namespace {
@@ -32,11 +36,18 @@ struct Module {
     void* native = nullptr;
     bool owned = true;
     bool global = false;
+    bool guest = false;
     ~Module() {
         if (owned && native) {
 #ifdef _WIN32
             FreeLibrary(static_cast<HMODULE>(native));
 #else
+#ifdef __APPLE__
+            if (guest) {
+                GuestImageLoaderInterface_nid_no_patch()->unload(native);
+                return;
+            }
+#endif
             ::dlclose(native);
 #endif
         }
@@ -50,6 +61,9 @@ void* Symbol(Module& module, const char* name) {
 #ifdef _WIN32
     return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(module.native), name));
 #else
+#ifdef __APPLE__
+    if (module.guest) return GuestImageLoaderInterface_nid_no_patch()->symbol(module.native, name);
+#endif
     return ::dlsym(module.native, name);
 #endif
 }
@@ -73,6 +87,9 @@ std::uintptr_t MainProgramBase() {
 }
 
 bool FromGuestModule(void* address) {
+#ifdef __APPLE__
+    if (address != nullptr && GuestImageContaining_nid_no_patch(reinterpret_cast<std::uintptr_t>(address)) != nullptr) return true;
+#endif
     Dl_info info{};
     if (address == nullptr || !::dladdr(address, &info) || info.dli_fname == nullptr) return false;
     if (reinterpret_cast<std::uintptr_t>(info.dli_fbase) == MainProgramBase()) return true;
@@ -158,6 +175,24 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             Error(message); return nullptr;
         }
 #else
+#ifdef __APPLE__
+        if (const auto* loader = GuestImageLoaderInterface_nid_no_patch()) {
+            module->guest = true;
+            if (!path) {
+                module->native = const_cast<void*>(GuestImageMain_nid_no_patch());
+                module->owned = false;
+                if (!module->native) { Error("dlopen: no main guest image is registered"); return nullptr; }
+            } else {
+                if (!*path) { Error("dlopen: empty module path"); return nullptr; }
+                module->native = loader->load(ResolvePath_nid_no_patch(path).string().c_str());
+                if (!module->native) { Error("dlopen: the translator could not load the guest module"); return nullptr; }
+            }
+            std::lock_guard lock(modulesMutex);
+            const auto handle = nextHandle++;
+            modules.emplace(handle, std::move(module));
+            return reinterpret_cast<void*>(handle);
+        }
+#endif
         const auto resolved = path ? RelinkedModulePath(ResolvePath_nid_no_patch(path)).string() : std::string{};
         const int nativeFlags = ((flags & 3) == 1 ? RTLD_LAZY : RTLD_NOW) |
             ((flags & 0x100) ? RTLD_GLOBAL : RTLD_LOCAL);

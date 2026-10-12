@@ -57,6 +57,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(libc PRIVATE LINKER:-z,now)
     target_link_options(libc INTERFACE LINKER:--no-as-needed)
 endif()
+if(APPLE)
+    set(ANYPS5_LIB_RPATH "@loader_path")
+    set(ANYPS5_SIGN_PATCHED codesign --force --sign -)
+    target_link_options(libc PRIVATE LINKER:-no_adhoc_codesign)
+else()
+    set(ANYPS5_LIB_RPATH "$ORIGIN")
+    set(ANYPS5_SIGN_PATCHED ${CMAKE_COMMAND} -E true)
+endif()
 
 set(UNPATCHED_DIR ${CMAKE_CURRENT_BINARY_DIR}/libs/unpatched)
 set(PATCHED_DIR ${CMAKE_CURRENT_BINARY_DIR}/libs)
@@ -69,7 +77,7 @@ set_target_properties(libc PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
         ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
         BUILD_WITH_INSTALL_RPATH ON
-        INSTALL_RPATH "$ORIGIN"
+        INSTALL_RPATH "${ANYPS5_LIB_RPATH}"
 )
 
 set(LIBC_UNPATCHED ${UNPATCHED_DIR}/libc.prx)
@@ -79,6 +87,7 @@ add_custom_command(
         OUTPUT ${LIBC_PATCHED}
         COMMAND ${CMAKE_COMMAND} -E copy ${LIBC_UNPATCHED} ${LIBC_PATCHED}
         COMMAND $<TARGET_FILE:nid_patcher> libc ${LIBC_PATCHED}
+        COMMAND ${ANYPS5_SIGN_PATCHED} ${LIBC_PATCHED}
         DEPENDS nid_patcher libc ${LIBC_UNPATCHED}
         COMMENT "Patching NIDs for libc"
 )
@@ -108,6 +117,8 @@ foreach(LIB_DIR ${LIBS_DIRS})
         endif()
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             target_link_options(${LIB_NAME} PRIVATE LINKER:-z,now)
+        elseif(APPLE)
+            target_link_options(${LIB_NAME} PRIVATE LINKER:-no_adhoc_codesign)
         endif()
         if(WIN32 AND LIB_NAME STREQUAL "libSceNet")
             target_link_libraries(${LIB_NAME} PRIVATE ws2_32)
@@ -124,7 +135,7 @@ foreach(LIB_DIR ${LIBS_DIRS})
                 LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
                 ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
                 BUILD_WITH_INSTALL_RPATH ON
-                INSTALL_RPATH "$ORIGIN"
+                INSTALL_RPATH "${ANYPS5_LIB_RPATH}"
         )
 
         set(UNPATCHED_FILE ${UNPATCHED_DIR}/${LIB_NAME}.prx)
@@ -134,6 +145,7 @@ foreach(LIB_DIR ${LIBS_DIRS})
                 OUTPUT ${PATCHED_FILE}
                 COMMAND ${CMAKE_COMMAND} -E copy ${UNPATCHED_FILE} ${PATCHED_FILE}
                 COMMAND $<TARGET_FILE:nid_patcher> ${LIB_NAME} --preserve-exports "${LIBC_UNPATCHED}" "${PATCHED_FILE}"
+                COMMAND ${ANYPS5_SIGN_PATCHED} "${PATCHED_FILE}"
                 DEPENDS nid_patcher ${LIB_NAME} ${UNPATCHED_FILE} ${LIBC_UNPATCHED}
                 COMMENT "Patching NIDs for ${LIB_NAME}"
         )

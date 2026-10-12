@@ -1,6 +1,7 @@
 #ifdef __APPLE__
 
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#include "prx/libc/include/GuestImageRegistry.hpp"
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
@@ -16,6 +17,7 @@ constexpr std::size_t HeadersOffset = 0x60;
 }
 
 extern "C" int dl_iterate_phdr(int (*callback)(dl_phdr_info*, std::size_t, void*), void* data) {
+    if (const int result = GuestImageIterate_nid_no_patch(callback, data); result != 0) return result;
     for (std::uint32_t index = 0; index < _dyld_image_count(); ++index) {
         const auto* header = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(index));
         if (header == nullptr || header->magic != MH_MAGIC_64 || (header->flags & MH_DYLIB_IN_CACHE) != 0) continue;
