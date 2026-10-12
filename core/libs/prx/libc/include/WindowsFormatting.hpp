@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_WINDOWSFORMATTING_HPP
 
 #include "SceTypes.hpp"
+#include "prx/libc/include/GuestLongDouble.hpp"
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -324,8 +325,7 @@ inline int FormatWindows(char* buffer, size_t size, const char* format, const vo
             output.Value(spec + "ll" + conversion, value);
         } else if (std::strchr("aAeEfFgG", conversion)) {
             if (length == "L") {
-                static_assert(sizeof(long double) == 16);
-                static_assert(std::numeric_limits<long double>::digits == 64);
+                RequireGuestLongDouble("printf %L");
                 output.Value(spec + "L" + conversion, args.Next<long double>());
             } else {
                 if (!length.empty() && length != "l") throw std::invalid_argument("Invalid floating length");

@@ -208,6 +208,21 @@ int CreateAnonymousFile() {
     }
     errno = EEXIST;
     return -1;
+#elif defined(__APPLE__)
+    static std::atomic<std::uint64_t> counter{0};
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "/anyps5-shm-%d-%llu", static_cast<int>(::getpid()),
+            static_cast<unsigned long long>(counter.fetch_add(1)));
+        const int descriptor = ::shm_open(name, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR);
+        if (descriptor < 0 && errno == EEXIST) continue;
+        if (descriptor < 0) return -1;
+        ::shm_unlink(name);
+        ::fcntl(descriptor, F_SETFD, FD_CLOEXEC);
+        return descriptor;
+    }
+    errno = EEXIST;
+    return -1;
 #else
     const int descriptor = memfd_create("anyps5 shm_open", MFD_CLOEXEC);
     return descriptor;

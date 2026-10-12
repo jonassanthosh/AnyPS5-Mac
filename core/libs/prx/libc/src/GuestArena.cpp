@@ -11,6 +11,10 @@
 #include <string>
 #include <sys/mman.h>
 #endif
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #include <cstdio>
 #include <iterator>
 #include <map>
@@ -153,6 +157,8 @@ private:
     Arena() {
 #if defined(__linux__)
         SeedLinuxUsedRanges();
+#elif defined(__APPLE__)
+        SeedMacUsedRanges();
 #elif defined(_WIN32)
         _writeWatched = std::getenv("APS5_NO_WRITE_WATCH") == nullptr;
         SYSTEM_INFO system{};
@@ -206,16 +212,53 @@ private:
         _base = ArenaStart;
         _end = ApplicationAreaEnd;
     }
+#endif
 
+#if defined(__APPLE__)
+    void SeedMacUsedRanges() {
+        mach_vm_address_t address = 0;
+        for (;;) {
+            mach_vm_size_t size = 0;
+            natural_t depth = 0;
+            vm_region_submap_info_data_64_t info{};
+            mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+            const auto result = mach_vm_region_recurse(mach_task_self(), &address, &size, &depth,
+                reinterpret_cast<vm_region_recurse_info_t>(&info), &count);
+            if (result == KERN_INVALID_ADDRESS) break;
+            if (result != KERN_SUCCESS) throw std::runtime_error("guest arena: mach_vm_region_recurse failed");
+            const auto begin = static_cast<std::uintptr_t>(address);
+            const auto end = static_cast<std::uintptr_t>(address + size);
+            address += size;
+            if (end <= ArenaStart || begin >= ApplicationAreaEnd) continue;
+            const auto first = std::max(begin, ArenaStart);
+            const auto last = std::min(end, ApplicationAreaEnd);
+            _used.emplace(first, last);
+            _hostRegions.emplace_back(first, last);
+        }
+        _used.emplace(SystemReservedStart, SystemReservedEnd);
+        _hostRegions.emplace_back(SystemReservedStart, SystemReservedEnd);
+        ReserveFreeRanges();
+        _base = ArenaStart;
+        _end = ApplicationAreaEnd;
+    }
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
     static void TryReserve(std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& occupied, std::uintptr_t from, std::uintptr_t to) {
         constexpr std::uintptr_t kChunk = 1ULL << 30;
         for (std::uintptr_t cursor = from; cursor < to; cursor += kChunk) {
             const auto end = std::min(cursor + kChunk, to);
             void* const wanted = reinterpret_cast<void*>(cursor);
+#ifdef __APPLE__
+            void* const placed = mmap(wanted, end - cursor, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (placed == wanted) continue;
+            const int failed = placed == MAP_FAILED ? errno : EEXIST;
+#else
             void* const placed = mmap(wanted, end - cursor, PROT_NONE,
                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
             if (placed == wanted) continue;
             const int failed = placed == MAP_FAILED ? errno : EINVAL;
+#endif
             if (placed != MAP_FAILED) munmap(placed, end - cursor);
             if (failed != EEXIST) {
                 char message[128];
@@ -378,7 +421,7 @@ void GuestArenaUnmapAlias_nid_postfix(void* alias) {
 }
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 namespace {
 int PosixProtection(std::uint32_t windowsProtection) {
     switch (windowsProtection) {
@@ -393,16 +436,24 @@ int PosixProtection(std::uint32_t windowsProtection) {
     }
 }
 
+int HostProtection(std::uint32_t windowsProtection) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    return PosixProtection(windowsProtection) & ~PROT_EXEC;
+#else
+    return PosixProtection(windowsProtection);
+#endif
+}
+
 void* PlaceAt(void* pointer, std::size_t bytes, std::uint32_t protection) {
-    return mmap(pointer, bytes, PosixProtection(protection), MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    return mmap(pointer, bytes, HostProtection(protection), MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
 }
 }
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 void GuestArenaSetProtection_nid_postfix(std::uintptr_t address, std::size_t bytes, std::uint32_t protection) {
     if (!Arena::Get().Contains(reinterpret_cast<void*>(address), bytes)) throw OutsideArena("set protection", reinterpret_cast<void*>(address), bytes);
-    if (mprotect(reinterpret_cast<void*>(address), bytes, PosixProtection(protection)) != 0)
+    if (mprotect(reinterpret_cast<void*>(address), bytes, HostProtection(protection)) != 0)
         throw std::system_error(errno, std::generic_category(), "guest arena protection failed");
 }
 

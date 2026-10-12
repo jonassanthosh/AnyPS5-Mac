@@ -22,6 +22,9 @@
 #include <cstring>
 #include <cstdarg>
 #include <deque>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
@@ -382,7 +385,11 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
 }
 #else
 #include <sys/statvfs.h>
+#ifdef __APPLE__
+#include <sys/mount.h>
+#else
 #include <sys/vfs.h>
+#endif
 static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     constexpr long PipeFilesystem = 0x50495045;
     struct stat file{};
@@ -396,7 +403,9 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     if (::fstatvfs(descriptor, &host) != 0) return SceErrorFromErrno(errno) & 0xffff;
     if (host.f_flag & ST_RDONLY) fs->f_flags |= KERNEL_MNT_RDONLY;
     if (host.f_flag & ST_NOSUID) fs->f_flags |= KERNEL_MNT_NOSUID;
+#ifdef ST_NOEXEC
     if (host.f_flag & ST_NOEXEC) fs->f_flags |= KERNEL_MNT_NOEXEC;
+#endif
     fs->f_bsize = host.f_frsize != 0 ? host.f_frsize : host.f_bsize;
     fs->f_iosize = host.f_bsize;
     fs->f_blocks = host.f_blocks;
@@ -780,6 +789,8 @@ int APS5_VABI sceKernelFdatasync(int fd) {
     if (fd >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(fd) ? GUEST_EINVAL : GUEST_EBADF);
 #ifdef _WIN32
     if (NativeSync(fd) != 0) return SceErrorFromErrno(errno);
+#elif defined(__APPLE__)
+    if (::fsync(fd) != 0) return SceErrorFromErrno(errno);
 #else
     if (::fdatasync(fd) != 0) return SceErrorFromErrno(errno);
 #endif
@@ -802,6 +813,91 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
     if (basep != nullptr) *basep = 0;
     return File::ReadDirectoryDescriptor(fd, buf, nbytes);
+}
+
+int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
+    return sceKernelGetdirentries(fd, buf, nbytes, nullptr);
+}
+
+#elif defined(__APPLE__)
+
+namespace {
+
+struct HostDirectoryStream {
+    DIR* stream = nullptr;
+    dev_t device = 0;
+    ino_t inode = 0;
+    std::int64_t position = 0;
+    std::optional<std::pair<std::string, std::pair<std::uint64_t, std::uint8_t>>> pending;
+
+    ~HostDirectoryStream() {
+        if (stream != nullptr) ::closedir(stream);
+    }
+};
+
+std::mutex hostDirectoryLock;
+std::map<int, std::unique_ptr<HostDirectoryStream>> hostDirectories;
+
+}
+
+int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
+    constexpr std::size_t GuestHeaderBytes = 8;
+    constexpr std::size_t GuestMaxName = 255;
+    if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
+    if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    struct stat status{};
+    if (::fstat(fd, &status) != 0) return SceErrorFromErrno(errno);
+    if (!S_ISDIR(status.st_mode)) return SceErrorFromErrno(GUEST_EINVAL);
+    std::lock_guard lock(hostDirectoryLock);
+    auto& slot = hostDirectories[fd];
+    if (!slot || slot->device != status.st_dev || slot->inode != status.st_ino) {
+        const int copy = ::dup(fd);
+        if (copy < 0) return SceErrorFromErrno(errno);
+        DIR* stream = ::fdopendir(copy);
+        if (stream == nullptr) {
+            const int error = errno;
+            ::close(copy);
+            return SceErrorFromErrno(error);
+        }
+        ::rewinddir(stream);
+        slot = std::make_unique<HostDirectoryStream>();
+        slot->stream = stream;
+        slot->device = status.st_dev;
+        slot->inode = status.st_ino;
+    }
+    if (basep != nullptr) *basep = slot->position;
+    std::size_t written = 0;
+    for (;;) {
+        if (!slot->pending) {
+            errno = 0;
+            const dirent* entry = ::readdir(slot->stream);
+            if (entry == nullptr) {
+                if (errno != 0) return written != 0 ? static_cast<int>(written) : SceErrorFromErrno(errno);
+                break;
+            }
+            slot->pending.emplace(std::string(entry->d_name, entry->d_namlen),
+                std::make_pair(static_cast<std::uint64_t>(entry->d_ino), static_cast<std::uint8_t>(entry->d_type)));
+        }
+        const auto& name = slot->pending->first;
+        const auto record = (GuestHeaderBytes + name.size() + 1 + 3) & ~std::size_t{3};
+        if (name.size() > GuestMaxName || written + record > static_cast<std::size_t>(nbytes)) {
+            if (written != 0) return static_cast<int>(written);
+            return name.size() > GuestMaxName ? static_cast<int>(0x80020000u | GUEST_ENAMETOOLONG) : SceErrorFromErrno(GUEST_EINVAL);
+        }
+        char* out = buf + written;
+        std::memset(out, 0, record);
+        const auto fileNumber = static_cast<std::uint32_t>(slot->pending->second.first);
+        const auto recordLength = static_cast<std::uint16_t>(record);
+        std::memcpy(out, &fileNumber, sizeof(fileNumber));
+        std::memcpy(out + 4, &recordLength, sizeof(recordLength));
+        out[6] = static_cast<char>(slot->pending->second.second);
+        out[7] = static_cast<char>(name.size());
+        std::memcpy(out + GuestHeaderBytes, name.data(), name.size());
+        written += record;
+        ++slot->position;
+        slot->pending.reset();
+    }
+    return static_cast<int>(written);
 }
 
 int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {

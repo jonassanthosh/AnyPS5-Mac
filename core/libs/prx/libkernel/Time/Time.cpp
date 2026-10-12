@@ -18,7 +18,9 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#if defined(__x86_64__)
 #include <x86intrin.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -594,19 +596,35 @@ int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
     return 0;
 }
 
+namespace {
+
+std::uint64_t HostCycleCounter() {
+#if defined(__x86_64__)
+    return __rdtsc();
+#elif defined(__aarch64__)
+    std::uint64_t ticks;
+    asm volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(ticks));
+    return ticks;
+#else
+#error "No cycle counter for this architecture"
+#endif
+}
+
+}
+
 uint64_t APS5_VABI sceKernelReadTsc(void) {
-    if (TimeScale() == 1.0) return __rdtsc();
-    static const std::uint64_t origin = __rdtsc();
-    return origin + static_cast<std::uint64_t>(static_cast<double>(__rdtsc() - origin) * TimeScale());
+    if (TimeScale() == 1.0) return HostCycleCounter();
+    static const std::uint64_t origin = HostCycleCounter();
+    return origin + static_cast<std::uint64_t>(static_cast<double>(HostCycleCounter() - origin) * TimeScale());
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
     static const std::uint64_t frequency = [] {
         const std::uint64_t startNanos = RawMonotonicNanos();
-        const std::uint64_t startTicks = __rdtsc();
+        const std::uint64_t startTicks = HostCycleCounter();
         TimedWait::SleepNanos(20000000ULL);
         const std::uint64_t elapsedNanos = RawMonotonicNanos() - startNanos;
-        const std::uint64_t elapsedTicks = __rdtsc() - startTicks;
+        const std::uint64_t elapsedTicks = HostCycleCounter() - startTicks;
         return static_cast<std::uint64_t>(static_cast<long double>(elapsedTicks) * 1000000000.0L / static_cast<long double>(elapsedNanos));
     }();
     return frequency;

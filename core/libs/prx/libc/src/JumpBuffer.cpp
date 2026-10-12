@@ -1,5 +1,9 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/AsmMacros.hpp"
+#include <cstdint>
+#include <stdexcept>
+
+#if defined(__x86_64__)
 
 // setjmp/longjmp must capture the guest's own frame, so they are written directly in assembly with
 // the guest (System V) calling convention. The saved state fits the guest's 96-byte jmp_buf:
@@ -46,3 +50,12 @@ asm(".text\n"
     "    ldmxcsr 64(%rdi)\n"
     "    fldcw 68(%rdi)\n"
     "    jmp *0(%rdi)\n");
+#else
+extern "C" int APS5_VABI setjmp_nid_postfix(std::uint64_t*) {
+    throw std::runtime_error("setjmp: capturing guest registers needs the translator's guest context on this architecture");
+}
+
+extern "C" [[noreturn]] void APS5_VABI longjmp_nid_postfix(std::uint64_t*, int) {
+    throw std::runtime_error("longjmp: restoring guest registers needs the translator's guest context on this architecture");
+}
+#endif

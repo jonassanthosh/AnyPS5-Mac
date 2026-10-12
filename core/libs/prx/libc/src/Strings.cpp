@@ -9,6 +9,7 @@
 #include <string>
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestLongDouble.hpp"
 #include "prx/libc/include/SonyCrt.hpp"
 
 namespace {
@@ -171,7 +172,7 @@ double APS5_VABI strtod_nid_postfix(const char* str, char** endptr) {
 double APS5_VABI atof_nid_postfix(const char* str) { return std::atof(str); }
 float APS5_VABI strtof_nid_postfix(const char* str, char** endptr) { return std::strtof(str, endptr); }
 long double APS5_VABI strtold_nid_postfix(const char* str, char** endptr) {
-    static_assert(sizeof(long double) == 16, "Guest long double requires x87 extended precision storage");
+    RequireGuestLongDouble("strtold");
     return std::strtold(str, endptr);
 }
 
@@ -460,8 +461,7 @@ float APS5_VABI wcstof_nid_postfix(const char16_t* str, char16_t** endptr) {
 }
 
 long double APS5_VABI wcstold_nid_postfix(const char16_t* str, char16_t** endptr) {
-    static_assert(sizeof(long double) == 16);
-    static_assert(std::numeric_limits<long double>::digits == 64);
+    RequireGuestLongDouble("wcstold");
     return ParseAsciiPrefix(str, endptr, [](const char* text, char** end) { return std::strtold(text, end); });
 }
 

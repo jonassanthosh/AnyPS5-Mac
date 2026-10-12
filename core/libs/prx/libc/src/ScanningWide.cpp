@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "SceTypes.hpp"
+#include "prx/libc/include/GuestLongDouble.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/WindowsFormatting.hpp"
 
@@ -269,7 +270,7 @@ private:
     }
 
     Outcome Float(const Directive& directive) {
-        static_assert(sizeof(long double) == 16 && std::numeric_limits<long double>::digits == 64);
+        if (directive.length == "L") RequireGuestLongDouble("swscanf %L");
         if (!directive.length.empty() && directive.length != "l" && directive.length != "L")
             throw std::invalid_argument("swscanf_s: invalid floating length modifier " + directive.length);
         void* target = nullptr;
