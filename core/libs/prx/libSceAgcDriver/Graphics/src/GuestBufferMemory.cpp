@@ -2858,8 +2858,9 @@ void GuestBufferMemory::UploadPrepare(bool addressable) {
                 region.pending = true;
                 continue;
             }
-            // An import found when the lease was acquired is reused while none was dropped since.
-            const HostImport* entry = region.direct != nullptr && state.epoch == importsEpoch ? region.direct : nullptr;
+            const auto* previous = region.direct;
+            const bool covers = previous != nullptr && region.begin >= previous->base && region.end <= previous->base + previous->bytes;
+            const HostImport* entry = covers && state.epoch == importsEpoch ? previous : nullptr;
             region.direct = nullptr;
             if (stale) {
                 region.pending = true;
