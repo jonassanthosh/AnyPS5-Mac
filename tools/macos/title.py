@@ -5,6 +5,7 @@ import filecmp
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 LIBRARY = Path.home() / "Library" / "Application Support" / "AnyPS5" / "Titles"
 MODULE_SUFFIXES = (".prx", ".sprx")
+BACKUP_SUFFIX = re.compile(r"\.(esbak|bak|orig|elf|bak_[0-9_]+)")
 SHARD_BYTES = 400000
 EBOOT_SHARDS = 256
 LEGACY_COMPILE_FLAGS = ["-std=c++20", "-O2", "-DAPS5_TRANSLATOR_TSO=1", "-DAPS5_TRANSLATOR_VECTOR_TSO=1", "-w"]
@@ -107,32 +109,56 @@ def parameters(root):
     return {"titleId": title_id, "name": names.get("titleName", title_id), "version": data.get("contentVersion", "")}
 
 
+def decrypted(path):
+    if is_elf(path):
+        return path
+    for candidate in sorted(path.parent.glob(path.name + ".*")):
+        if BACKUP_SUFFIX.fullmatch(candidate.name[len(path.name):]) and is_elf(candidate):
+            return candidate
+    return None
+
+
 def executable_folder(root):
     for folder in (root / "decrypted", root):
-        eboot = folder / "eboot.bin"
-        if is_elf(eboot):
+        if decrypted(folder / "eboot.bin") is not None:
             return folder
-        if is_elf(eboot.with_name("eboot.bin.esbak")):
-            raise TitleError(f"{eboot} is signed; restore the decrypted eboot.bin from eboot.bin.esbak")
-    raise TitleError(f"no decrypted eboot.bin in {root} or {root / 'decrypted'}")
+    if (root / "eboot.bin").exists():
+        raise TitleError(f"{root / 'eboot.bin'} is encrypted and the folder has no decrypted copy of it")
+    raise TitleError(f"no eboot.bin in {root} or {root / 'decrypted'}")
 
 
-def system_libraries(repo):
-    return repo / "build-arm64" / "core" / "libs" / "libs"
+def replaced_by_system(path, libraries):
+    return (libraries / path.name).exists() or (libraries / (path.stem + ".prx")).exists()
 
 
-def guest_modules(folder, libraries):
+def image_overlay(folder, target, libraries):
+    image = target / "image"
+    shutil.rmtree(image, ignore_errors=True)
+    image.mkdir(parents=True)
+    (image / "eboot.bin").symlink_to(decrypted(folder / "eboot.bin"))
     modules = []
     for path in sorted(folder.rglob("*")):
         if path.suffix not in MODULE_SUFFIXES or not path.is_file():
             continue
         relative = path.relative_to(folder)
-        if relative.parts[0] == "sce_sys" or (libraries / path.name).exists():
+        if relative.parts[0] == "sce_sys":
             continue
-        if not is_elf(path):
-            raise TitleError(f"{relative} is not decrypted")
-        modules.append(path)
-    return modules
+        source = decrypted(path)
+        system = replaced_by_system(path, libraries)
+        if source is None:
+            if system:
+                continue
+            raise TitleError(f"{relative} is encrypted and the folder has no decrypted copy of it")
+        link = image / relative
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(source)
+        if not system:
+            modules.append(link)
+    return image, modules
+
+
+def system_libraries(repo):
+    return repo / "build-arm64" / "core" / "libs" / "libs"
 
 
 def run_checked(command, what, cwd=None):
@@ -261,11 +287,10 @@ TRANSLATOR_TARGETS = ["x64a64", "translator_title_main", "translator_runtime", "
 def plan(repo, game, library):
     root = game_root(game)
     info = parameters(root)
-    folder = executable_folder(root)
     target = title_folder(library, info["titleId"])
+    folder, modules = image_overlay(executable_folder(root), target, system_libraries(repo))
     settings = effective_settings(library, info["titleId"])
     translator = repo / "build-translator"
-    modules = guest_modules(folder, system_libraries(repo))
     images = [(folder / "eboot.bin", "", EBOOT_SHARDS)]
     images += [(path, f"M{index}", path.stat().st_size // SHARD_BYTES + 2) for index, path in enumerate(modules, 1)]
     return {"root": root, "info": info, "folder": folder, "target": target, "settings": settings, "translator": translator, "images": images}
@@ -330,7 +355,7 @@ def run(arguments):
     binary = target / "title"
     if not binary.exists() or not (target / "title.json").exists():
         raise TitleError(f"{info['name']} is not built yet; run: {Path(__file__).name} build {root}")
-    folder = executable_folder(root)
+    folder, _ = image_overlay(executable_folder(root), target, system_libraries(repo))
     workspace = target / "run"
     workspace.mkdir(parents=True, exist_ok=True)
     app0 = workspace / "app0"

@@ -56,14 +56,25 @@ enum GameInspector {
     }
 
     static func executableProblem(_ root: URL) -> String? {
-        var signed = false
+        var found = false
         for folder in [root.appendingPathComponent("decrypted"), root] {
             let eboot = folder.appendingPathComponent("eboot.bin")
-            if isElf(eboot) { return nil }
-            if isElf(eboot.appendingPathExtension("esbak")) { return "eboot.bin is signed. Restore the decrypted eboot.bin from eboot.bin.esbak." }
-            if FileManager.default.fileExists(atPath: eboot.path) { signed = true }
+            if decrypted(eboot) != nil { return nil }
+            if FileManager.default.fileExists(atPath: eboot.path) { found = true }
         }
-        return signed ? "eboot.bin is encrypted. AnyPS5 needs a decrypted dump." : "The folder has no eboot.bin."
+        return found ? "eboot.bin is encrypted and the folder has no decrypted copy of it (such as eboot.bin.esbak or eboot.bin.bak_…). AnyPS5 needs a decrypted dump." : "The folder has no eboot.bin."
+    }
+
+    static func decrypted(_ file: URL) -> URL? {
+        if isElf(file) { return file }
+        let name = file.lastPathComponent
+        let siblings = (try? FileManager.default.contentsOfDirectory(at: file.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? []
+        let backups = siblings.filter { sibling in
+            let other = sibling.lastPathComponent
+            guard other.hasPrefix(name + ".") else { return false }
+            return other.dropFirst(name.count).range(of: #"^\.(esbak|bak|orig|elf|bak_[0-9_]+)$"#, options: .regularExpression) != nil
+        }
+        return backups.sorted { $0.lastPathComponent < $1.lastPathComponent }.first(where: isElf)
     }
 
     static func isElf(_ url: URL) -> Bool {

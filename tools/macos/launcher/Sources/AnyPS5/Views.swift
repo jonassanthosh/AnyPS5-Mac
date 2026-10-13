@@ -161,17 +161,18 @@ struct GameDetail: View {
     @State private var editingSettings = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            header
-            Divider()
-            status
-            if !entry.output.isEmpty {
-                BuildOutput(lines: entry.output)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                header
+                Divider()
+                status
+                if !entry.output.isEmpty {
+                    BuildOutput(lines: entry.output)
+                }
             }
-            Spacer(minLength: 0)
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .toolbar {
             ToolbarItem {
                 Button {
