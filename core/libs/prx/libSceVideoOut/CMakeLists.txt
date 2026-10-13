@@ -18,6 +18,9 @@ target_include_directories(libSceVideoOut PRIVATE
         ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
 )
 target_link_libraries(libSceVideoOut PRIVATE libSceAgcDriver libScePad libSceMouse libSceKeyboard libc libkernel decoder_png SDL2-static)
+if(APPLE)
+    target_link_libraries(libSceVideoOut PRIVATE objc)
+endif()
 if(WIN32)
     target_link_libraries(libSceVideoOut PRIVATE comctl32)
 endif()
