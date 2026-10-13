@@ -177,6 +177,9 @@ ElfImage ElfImage::Load(const std::filesystem::path& path) {
             tags.emplace(tag, value);
         }
         bool sce = tags.count(DtOsRela) != 0 || tags.count(DtOsSymTab) != 0;
+        if (auto it = tags.find(12); it != tags.end()) image._init = it->second;
+        if (auto it = tags.find(25); it != tags.end()) image._initArray = it->second;
+        if (auto it = tags.find(27); it != tags.end()) image._initArraySize = it->second;
         if (sce && !dynlibOffset) {
             throw std::runtime_error("PS5 dynamic tags without a PT_SCE_DYNLIBDATA segment");
         }

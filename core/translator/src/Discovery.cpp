@@ -60,7 +60,7 @@ bool IsBlockTerminator(const ZydisDecodedInstruction& instruction) {
     }
 }
 
-Discovery::Discovery(const ElfImage& image) : _image(image) {
+Discovery::Discovery(const ElfImage& image) : _image(image), _exceptions(ReadExceptionTables(image)) {
     ZydisDecoderInit(&_decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
 }
 
@@ -84,9 +84,25 @@ std::set<std::uint64_t> Discovery::InitialEntries() const {
             entries.insert(symbol.value);
         }
     }
+    for (const auto& symbol : _image.DynamicSymbols()) {
+        if (symbol.defined && symbol.value != 0 && (symbol.type == SttFunc || symbol.type == 0) && _image.IsExecutable(symbol.value)) {
+            entries.insert(symbol.value);
+        }
+    }
+    if (_image.Init() != 0 && _image.IsExecutable(_image.Init())) {
+        entries.insert(_image.Init());
+    }
+    entries.insert(_exceptions.functionStarts.begin(), _exceptions.functionStarts.end());
+    const auto& dynamic = _image.DynamicSymbols();
     for (const auto& relocation : _image.Relocations()) {
         if (relocation.type == RX8664Relative && _image.IsExecutable(static_cast<std::uint64_t>(relocation.addend))) {
             entries.insert(static_cast<std::uint64_t>(relocation.addend));
+        } else if (relocation.symbolIndex != 0 && relocation.symbolIndex < dynamic.size()) {
+            const auto& symbol = dynamic[relocation.symbolIndex];
+            const auto target = symbol.value + static_cast<std::uint64_t>(relocation.addend);
+            if (symbol.defined && symbol.value != 0 && _image.IsExecutable(target)) {
+                entries.insert(target);
+            }
         }
     }
     return entries;
@@ -132,6 +148,16 @@ TranslatedFunctionInfo Discovery::ExploreFunction(std::uint64_t entry, const std
     std::set<std::uint64_t> leaders{entry};
     std::map<std::uint64_t, std::vector<std::uint64_t>> tables;
     std::deque<std::uint64_t> worklist{entry};
+    std::set<std::uint64_t> landingPads;
+    if (auto pads = _exceptions.landingPads.find(entry); pads != _exceptions.landingPads.end()) {
+        for (auto pad : pads->second) {
+            if (_image.IsExecutable(pad)) {
+                landingPads.insert(pad);
+                leaders.insert(pad);
+                worklist.push_back(pad);
+            }
+        }
+    }
     while (!worklist.empty()) {
         auto address = worklist.front();
         worklist.pop_front();
@@ -179,7 +205,7 @@ TranslatedFunctionInfo Discovery::ExploreFunction(std::uint64_t entry, const std
                         }
                     }
                     std::vector<std::uint64_t> targets;
-                    if (RecoverJumpTable(path, decoded, targets)) {
+                    if (RecoverJumpTable(path, decoded, instructions, targets)) {
                         tables[address] = targets;
                         for (auto target : targets) {
                             leaders.insert(target);
@@ -194,6 +220,7 @@ TranslatedFunctionInfo Discovery::ExploreFunction(std::uint64_t entry, const std
 
     TranslatedFunctionInfo function;
     function.entry = entry;
+    function.landingPads = landingPads;
     BasicBlock* current = nullptr;
     std::uint64_t expected = 0;
     for (const auto& [address, decoded] : instructions) {
@@ -249,7 +276,7 @@ TranslatedFunctionInfo Discovery::Materialize(const TranslatedFunctionInfo& func
 }
 
 bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, const DecodedInstruction& jump,
-    std::vector<std::uint64_t>& targets) const {
+    const std::map<std::uint64_t, DecodedInstruction>& function, std::vector<std::uint64_t>& targets) const {
     const auto& operand = jump.operands[0];
     ZydisRegister indexRegister = ZYDIS_REGISTER_NONE;
     std::uint64_t table = 0;
@@ -288,7 +315,18 @@ bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, co
             }
         }
         if (!relative) {
-            return false;
+            std::set<std::uint64_t> bases;
+            for (const auto& [address, candidate] : function) {
+                if (candidate.instruction.mnemonic != ZYDIS_MNEMONIC_LEA || Enclosing(candidate.operands[0].reg.value) != baseRegister) {
+                    continue;
+                }
+                if (auto lea = RipRelativeAddress(candidate, candidate.operands[1])) bases.insert(*lea);
+            }
+            if (bases.size() != 1) {
+                return false;
+            }
+            table = *bases.begin();
+            relative = true;
         }
     } else {
         return false;
@@ -310,6 +348,87 @@ bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, co
             count = candidate.operands[1].imm.value.u + 1;
             break;
         }
+        if (candidate.instruction.mnemonic == ZYDIS_MNEMONIC_BEXTR && candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            Enclosing(candidate.operands[0].reg.value) == indexRegister) {
+            std::optional<std::uint64_t> control;
+            if (candidate.operands[2].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+                control = candidate.operands[2].imm.value.u;
+            } else if (candidate.operands[2].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+                const auto controlRegister = Enclosing(candidate.operands[2].reg.value);
+                for (std::size_t j = i + 1; j < path.size(); ++j) {
+                    const auto& source = path[j];
+                    if (source.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && source.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                        Enclosing(source.operands[0].reg.value) == controlRegister) {
+                        if (source.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) control = source.operands[1].imm.value.u;
+                        break;
+                    }
+                }
+            }
+            if (control) {
+                const auto length = (*control >> 8) & 0xff;
+                if (length > 0 && length <= 12) {
+                    count = std::uint64_t(1) << length;
+                    break;
+                }
+            }
+            return false;
+        }
+        if (candidate.instruction.mnemonic == ZYDIS_MNEMONIC_AND &&
+            candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            Enclosing(candidate.operands[0].reg.value) == indexRegister &&
+            candidate.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+            const auto mask = candidate.operands[1].imm.value.u & 0xffffffffull;
+            if (mask != 0 && (mask & (mask + 1)) == 0) {
+                count = mask + 1;
+                break;
+            }
+        }
+    }
+    if (!count && relative) {
+        auto range = _exceptions.functionRanges.upper_bound(jump.address);
+        if (range == _exceptions.functionRanges.begin() || jump.address >= std::prev(range)->second) {
+            return false;
+        }
+        --range;
+        std::set<ZydisRegister> copies{indexRegister};
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (const auto& [address, candidate] : function) {
+                const auto mnemonic = candidate.instruction.mnemonic;
+                if ((mnemonic != ZYDIS_MNEMONIC_MOV && mnemonic != ZYDIS_MNEMONIC_MOVZX) ||
+                    candidate.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || candidate.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER) {
+                    continue;
+                }
+                const auto destination = Enclosing(candidate.operands[0].reg.value);
+                const auto source = Enclosing(candidate.operands[1].reg.value);
+                if (copies.count(destination) != 0 && copies.insert(source).second) grew = true;
+                if (copies.count(source) != 0 && copies.insert(destination).second) grew = true;
+            }
+        }
+        std::optional<std::uint64_t> bound;
+        for (auto it = function.begin(); it != function.end() && it->first < jump.address; ++it) {
+            const auto& candidate = it->second;
+            if (candidate.instruction.mnemonic != ZYDIS_MNEMONIC_CMP || candidate.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                candidate.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || copies.count(Enclosing(candidate.operands[0].reg.value)) == 0) {
+                continue;
+            }
+            const auto next = function.find(candidate.Next());
+            if (next == function.end()) continue;
+            const auto immediate = candidate.operands[1].imm.value.u & 0xffffffffull;
+            if (next->second.instruction.mnemonic == ZYDIS_MNEMONIC_JNBE) bound = immediate + 1;
+            else if (next->second.instruction.mnemonic == ZYDIS_MNEMONIC_JNB) bound = immediate;
+        }
+        if (!bound || *bound < 2 || *bound > 4096) {
+            return false;
+        }
+        for (std::uint64_t i = 0; i < *bound; ++i) {
+            auto entry = _image.ReadDword(table + i * 4);
+            DecodedInstruction decoded;
+            if (!entry) return false;
+            const auto target = table + static_cast<std::int64_t>(*entry);
+            if (target < range->first || target >= range->second || !Decode(target, decoded)) return false;
+        }
+        count = bound;
     }
     if (!count || *count > 4096) {
         return false;

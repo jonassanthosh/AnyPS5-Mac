@@ -17,7 +17,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/zydis ${CMAKE_CURREN
 add_library(translator_elf STATIC src/ElfImage.cpp)
 target_include_directories(translator_elf PUBLIC src)
 
-add_executable(x64a64 src/main.cpp src/Discovery.cpp src/Emitter.cpp)
+add_executable(x64a64 src/main.cpp src/Discovery.cpp src/Emitter.cpp src/ExceptionTables.cpp)
 target_link_libraries(x64a64 PRIVATE translator_elf Zydis)
 
 add_library(translator_runtime STATIC runtime/src/Runtime.cpp runtime/src/HostCall.S
@@ -29,6 +29,9 @@ target_link_libraries(translator_runtime PUBLIC translator_elf)
 add_library(translator_title_main STATIC runtime/src/TitleMain.cpp)
 target_link_libraries(translator_title_main PUBLIC translator_runtime)
 target_include_directories(translator_title_main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/include)
+if(APPLE)
+    target_link_libraries(translator_title_main PUBLIC "-framework CoreFoundation")
+endif()
 
 target_compile_definitions(translator_runtime PUBLIC APS5_TRANSLATOR_TSO=$<BOOL:${APS5_TRANSLATOR_TSO}>
     APS5_TRANSLATOR_VECTOR_TSO=$<BOOL:${APS5_TRANSLATOR_VECTOR_TSO}>)

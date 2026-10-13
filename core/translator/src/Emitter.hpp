@@ -4,6 +4,7 @@
 #include "Discovery.hpp"
 #include "ElfImage.hpp"
 #include <map>
+#include <set>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -13,6 +14,8 @@ namespace translator {
 
 struct EmitOptions {
     bool conservativeFlags = false;
+    std::string symbolPrefix;
+    std::string imageName = "eboot.bin";
 };
 
 struct EmitStatistics {
@@ -59,6 +62,8 @@ private:
     std::string Load(const ZydisDecodedOperand& operand, const std::string& type) const;
     std::string Store(const ZydisDecodedOperand& operand, const std::string& type) const;
     std::string FunctionName(std::uint64_t entry) const;
+    std::string Suffix() const;
+    std::string BaseName() const;
     std::string Absolute(std::uint64_t vaddr) const;
     std::string CallTo(const std::string& target, std::uint64_t returnAddress) const;
 
@@ -67,6 +72,7 @@ private:
     const Program& _program;
     EmitOptions _options;
     EmitStatistics _statistics;
+    std::set<std::string> _referenced;
 };
 
 }

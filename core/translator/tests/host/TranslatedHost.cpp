@@ -11,8 +11,7 @@
 #include <pthread.h>
 #include <string>
 
-extern "C" const translator::TranslatedEntry aps5TranslatedFunctions[];
-extern "C" const std::size_t aps5TranslatedFunctionCount;
+extern "C" const translator::TranslatedImage aps5TranslatedImage;
 
 namespace {
 
@@ -126,13 +125,8 @@ void HostPrintfImport(GuestContext* c) {
     c->gpr[translator::Rax] = output.size();
 }
 
-void HostSum8Import(GuestContext* c) {
-    SysVArguments arguments(c);
-    long total = 0;
-    for (long weight = 1; weight <= 8; ++weight) {
-        total += weight * static_cast<long>(arguments.NextInteger());
-    }
-    c->gpr[translator::Rax] = static_cast<std::uint64_t>(total);
+extern "C" long HostSum8(long a, long b, long c, long d, long e, long f, long g, long h) {
+    return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h;
 }
 
 extern "C" void HostQsort(void* base, unsigned long count, unsigned long size, int (*compare)(const void*, const void*)) {
@@ -160,7 +154,6 @@ int main(int argc, char** argv) {
     }
     try {
         auto& runtime = Runtime::Instance();
-        runtime.RegisterFunctions(aps5TranslatedFunctions, aps5TranslatedFunctionCount);
         runtime.RegisterImport("host_print_i64", reinterpret_cast<void*>(HostPrintI64));
         runtime.RegisterImport("host_print_f64", reinterpret_cast<void*>(HostPrintF64));
         runtime.RegisterImport("host_print_f32", reinterpret_cast<void*>(HostPrintF32));
@@ -176,8 +169,8 @@ int main(int argc, char** argv) {
         for (const auto& [name, handler] : translator::RuntimeContextImports()) {
             runtime.RegisterContextImport(name, handler);
         }
-        runtime.RegisterContextImport("host_sum8", HostSum8Import);
-        runtime.LoadImage(argv[1]);
+        runtime.RegisterImport("host_sum8", reinterpret_cast<void*>(HostSum8));
+        runtime.LoadImage(argv[1], aps5TranslatedImage, true);
         runtime.InstallCallbackBridge();
         auto result = runtime.CallGuest(runtime.SymbolAddress("test_main"), {});
         std::printf("result=%ld\n", static_cast<long>(result));

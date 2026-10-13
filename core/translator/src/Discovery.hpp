@@ -2,6 +2,7 @@
 #define CORE_TRANSLATOR_SRC_DISCOVERY_HPP
 
 #include "ElfImage.hpp"
+#include "ExceptionTables.hpp"
 #include <Zydis/Zydis.h>
 #include <cstdint>
 #include <map>
@@ -32,6 +33,7 @@ struct TranslatedFunctionInfo {
     std::uint64_t entry;
     std::string name;
     std::map<std::uint64_t, BasicBlock> blocks;
+    std::set<std::uint64_t> landingPads;
 };
 
 struct Program {
@@ -52,10 +54,11 @@ private:
     TranslatedFunctionInfo ExploreFunction(std::uint64_t entry, const std::set<std::uint64_t>& knownEntries,
         std::set<std::uint64_t>& newEntries, std::vector<std::string>& warnings) const;
     bool RecoverJumpTable(const std::vector<DecodedInstruction>& path, const DecodedInstruction& jump,
-        std::vector<std::uint64_t>& targets) const;
+        const std::map<std::uint64_t, DecodedInstruction>& function, std::vector<std::uint64_t>& targets) const;
     std::set<std::uint64_t> InitialEntries() const;
 
     const ElfImage& _image;
+    ExceptionTables _exceptions;
     ZydisDecoder _decoder;
 };
 

@@ -205,11 +205,19 @@ std::string Emitter::Store(const ZydisDecodedOperand& operand, const std::string
 }
 
 std::string Emitter::FunctionName(std::uint64_t entry) const {
-    return "F_" + HexName(entry);
+    return _options.symbolPrefix + "F_" + HexName(entry);
+}
+
+std::string Emitter::Suffix() const {
+    return _options.symbolPrefix.empty() ? std::string() : "_" + _options.symbolPrefix;
+}
+
+std::string Emitter::BaseName() const {
+    return "aps5ImageBase" + Suffix();
 }
 
 std::string Emitter::Absolute(std::uint64_t vaddr) const {
-    return "(c->imageBase + " + Hex(vaddr) + ")";
+    return "(" + BaseName() + " + " + Hex(vaddr) + ")";
 }
 
 std::string Emitter::Address(const DecodedInstruction& decoded, const ZydisDecodedOperand& operand) const {
@@ -384,34 +392,65 @@ void Emitter::Emit(const std::vector<std::ostream*>& shards) {
         }
     }
     std::vector<bool> covered(executableEnd > executableStart ? executableEnd - executableStart : 0);
-    for (auto* out : shards) {
-        *out << "#include \"translator/SemanticsVector.hpp\"\n#include \"translator/Runtime.hpp\"\n\n"
-             << "using namespace translator;\n\n";
-        for (const auto& [entry, function] : _program.functions) {
-            *out << "void " << FunctionName(entry) << "(GuestContext* __restrict g);\n";
-        }
-        *out << "\n";
+    std::size_t totalInstructions = 0;
+    for (const auto& [entry, function] : _program.functions) {
+        for (const auto& [start, block] : function.blocks) totalInstructions += block.addresses.size();
     }
-    std::size_t index = 0;
+    const auto perShard = std::max<std::size_t>(1, totalInstructions / shards.size() + 1);
+    auto writeShard = [&](std::size_t shard, const std::ostringstream& body) {
+        auto& out = *shards[shard];
+        out << "#include \"translator/SemanticsVector.hpp\"\n#include \"translator/Runtime.hpp\"\n\n"
+            << "using namespace translator;\n\nextern \"C\" u64 " << BaseName() << ";\n\n";
+        for (const auto& name : _referenced) {
+            out << "void " << name << "(GuestContext* __restrict g);\n";
+        }
+        out << "\n" << body.str();
+    };
+    std::size_t shard = 0;
+    std::size_t shardInstructions = 0;
+    std::ostringstream body;
+    _referenced.clear();
     for (const auto& [entry, function] : _program.functions) {
         auto materialized = _discovery.Materialize(function);
+        std::size_t instructions = 0;
         for (const auto& [start, block] : materialized.blocks) {
+            instructions += block.instructions.size();
             for (const auto& decoded : block.instructions) {
                 for (std::uint64_t byte = decoded.address; byte < decoded.Next() && byte < executableEnd; ++byte) {
                     if (byte >= executableStart) covered[byte - executableStart] = true;
                 }
             }
         }
-        EmitFunction(*shards[index++ % shards.size()], materialized);
+        if (shardInstructions >= perShard && shard + 1 < shards.size()) {
+            writeShard(shard++, body);
+            body.str(std::string());
+            body.clear();
+            _referenced.clear();
+            shardInstructions = 0;
+        }
+        _referenced.insert(FunctionName(entry));
+        EmitFunction(body, materialized);
+        shardInstructions += instructions;
+    }
+    writeShard(shard++, body);
+    for (; shard < shards.size(); ++shard) {
+        _referenced.clear();
+        writeShard(shard, std::ostringstream());
     }
     _statistics.executableBytes = covered.size();
     _statistics.coveredBytes = static_cast<std::size_t>(std::count(covered.begin(), covered.end(), true));
     auto& first = *shards.front();
-    first << "extern \"C\" const TranslatedEntry aps5TranslatedFunctions[] = {\n";
+    for (const auto& [entry, function] : _program.functions) {
+        first << "void " << FunctionName(entry) << "(GuestContext* __restrict g);\n";
+    }
+    const auto table = "aps5TranslatedFunctions" + Suffix();
+    first << "extern \"C\" u64 " << BaseName() << " = 0;\n";
+    first << "extern \"C\" const TranslatedEntry " << table << "[] = {\n";
     for (const auto& [entry, function] : _program.functions) {
         first << "    {" << Hex(entry) << ", " << FunctionName(entry) << "},\n";
     }
-    first << "};\nextern \"C\" const std::size_t aps5TranslatedFunctionCount = " << _program.functions.size() << ";\n";
+    first << "};\nextern \"C\" const TranslatedImage aps5TranslatedImage" << Suffix() << " = {\"" << _options.imageName << "\", " << table
+          << ", " << _program.functions.size() << ", &" << BaseName() << "};\n";
 }
 
 void Emitter::EmitFunction(std::ostream& out, const TranslatedFunctionInfo& function) {
@@ -449,7 +488,7 @@ void Emitter::EmitFunction(std::ostream& out, const TranslatedFunctionInfo& func
     }
     out << "void " << FunctionName(function.entry) << "(GuestContext* __restrict g) {\n";
     out << "    GuestContext local;\n    GuestContext* __restrict c = &local;\n";
-    out << "    c->imageBase = g->imageBase; c->fsBase = g->fsBase;\n";
+    out << "    c->fsBase = g->fsBase;\n";
     out << "    auto in = [&]() __attribute__((always_inline)) {";
     for (int i = 0; i < 16; ++i) {
         if ((usedGpr >> i) & 1) out << " c->gpr[" << i << "] = g->gpr[" << i << "];";
@@ -477,9 +516,14 @@ void Emitter::EmitFunction(std::ostream& out, const TranslatedFunctionInfo& func
             }
         }
     }
+    for (auto pad : function.landingPads) {
+        if (function.blocks.count(pad) != 0 && std::find(resumePoints.begin(), resumePoints.end(), pad) == resumePoints.end()) {
+            resumePoints.push_back(pad);
+        }
+    }
     out << "L_unwind:\n";
     if (!resumePoints.empty()) {
-        out << "    if (c->gpr[Rsp] < frameEntryRsp) {\n      switch (g->returnTarget - c->imageBase) {\n";
+        out << "    if (c->gpr[Rsp] < frameEntryRsp) {\n      switch (g->returnTarget - " << BaseName() << ") {\n";
         for (auto point : resumePoints) {
             out << "      case " << Hex(point) << ": goto L_" << HexName(point) << ";\n";
         }
@@ -554,8 +598,12 @@ bool Emitter::EmitControl(std::ostream& out, const TranslatedFunctionInfo& funct
         } else {
             condition = Condition(mnemonic.substr(1));
         }
-        out << "    if (" << condition << ") goto L_" << HexName(target) << ";\n";
-        out << "    goto L_" << HexName(decoded.Next()) << ";\n";
+        auto branch = [&](std::uint64_t address) {
+            return function.blocks.count(address) != 0 ? "goto L_" + HexName(address) + ";"
+                                                       : "{ out(); FellOffCode(g, " + Hex(address) + "); }";
+        };
+        out << "    if (" << condition << ") " << branch(target) << "\n";
+        out << "    " << branch(decoded.Next()) << "\n";
         return true;
     }
     switch (instruction.mnemonic) {
@@ -565,6 +613,7 @@ bool Emitter::EmitControl(std::ostream& out, const TranslatedFunctionInfo& funct
             if (function.blocks.count(target) != 0 && !(target == function.entry && block.successors.empty())) {
                 out << "    goto L_" << HexName(target) << ";\n";
             } else if (_program.functions.count(target) != 0) {
+                _referenced.insert(FunctionName(target));
                 out << "    out(); [[clang::musttail]] return " << FunctionName(target) << "(g);\n";
             } else {
                 out << "    g->jumpTarget = " << Absolute(target) << "; out();\n    [[clang::musttail]] return JumpIndirect(g);\n";
@@ -591,9 +640,18 @@ bool Emitter::EmitControl(std::ostream& out, const TranslatedFunctionInfo& funct
         out << "    { u64 target = " << Read(decoded, 0, 64) << ";\n";
         if (block.jumpTableRecovered) {
             ++_statistics.recoveredJumpTables;
-            out << "      switch (target - c->imageBase) {\n";
+            out << "      switch (target - " << BaseName() << ") {\n";
             for (auto target : block.jumpTableTargets) {
+                if (function.blocks.count(target) == 0) continue;
                 out << "      case " << Hex(target) << ": goto L_" << HexName(target) << ";\n";
+            }
+            out << "      default: break;\n      }\n";
+        } else if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            out << "      switch (target - " << BaseName() << ") {\n";
+            for (const auto& [start, other] : function.blocks) {
+                if (start != function.entry) {
+                    out << "      case " << Hex(start) << ": goto L_" << HexName(start) << ";\n";
+                }
             }
             out << "      default: break;\n      }\n";
         }
@@ -603,6 +661,7 @@ bool Emitter::EmitControl(std::ostream& out, const TranslatedFunctionInfo& funct
     case ZYDIS_MNEMONIC_CALL: {
         if (operand.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
             auto target = decoded.Next() + operand.imm.value.u;
+            if (_program.functions.count(target) != 0) _referenced.insert(FunctionName(target));
             std::string call = _program.functions.count(target) != 0
                 ? FunctionName(target) + "(g);"
                 : "CallIndirect(g, " + Absolute(target) + ");";

@@ -13,7 +13,7 @@
 namespace {
 
 void PrintUsage() {
-    std::cerr << "usage: x64a64 <input.elf> -o <output.cpp> [--shards <n>] [--conservative-flags] [--report]\n";
+    std::cerr << "usage: x64a64 <input.elf> -o <output.cpp> [--shards <n>] [--symbol-prefix <p>] [--image-name <name>] [--conservative-flags] [--report]\n";
 }
 
 void PrintReport(const translator::Program& program, const translator::EmitStatistics& statistics) {
@@ -63,6 +63,10 @@ int main(int argc, char** argv) {
             output = argv[++i];
         } else if (argument == "--report") {
             report = true;
+        } else if (argument == "--symbol-prefix" && i + 1 < argc) {
+            options.symbolPrefix = argv[++i];
+        } else if (argument == "--image-name" && i + 1 < argc) {
+            options.imageName = argv[++i];
         } else if (argument == "--shards" && i + 1 < argc) {
             shardCount = static_cast<unsigned>(std::stoul(argv[++i]));
         } else if (argument == "--conservative-flags") {
