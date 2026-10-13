@@ -5,6 +5,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <dlfcn.h>
 #include <execinfo.h>
 #include <stdexcept>
 #include <sys/ucontext.h>
@@ -99,6 +100,20 @@ void Runtime::InstallCallbackBridge() {
 
 }
 
+namespace {
+
+void AwaitProcessExit() {
+    using Await = void (*)();
+    static const auto await = reinterpret_cast<Await>(::dlsym(RTLD_DEFAULT, "LibcAwaitExit_nid_postfix"));
+    if (await == nullptr) return;
+    try {
+        await();
+    } catch (...) {
+    }
+}
+
+}
+
 extern "C" void* Aps5GuestCallbackFromNative(std::uint64_t target, const std::uint64_t* integers, const std::uint8_t* vectors,
     std::uint8_t* result) {
     using namespace translator;
@@ -121,6 +136,7 @@ extern "C" void* Aps5GuestCallbackFromNative(std::uint64_t target, const std::ui
         std::memcpy(result + 16, c->ymm[0], 16);
         *c = *saved;
     } catch (const std::exception& error) {
+        AwaitProcessExit();
         std::fprintf(stderr, "native-to-guest call of 0x%llx failed: %s\n", static_cast<unsigned long long>(target), error.what());
         std::abort();
     }
