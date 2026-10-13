@@ -155,6 +155,14 @@ void Dispatch(int native) {
     const auto callback = handlers[guest].load();
     if (reinterpret_cast<std::uintptr_t>(callback) > 1) callback(guest);
 }
+#if defined(__APPLE__) && defined(__aarch64__)
+constexpr bool TranslatedGuest = true;
+#else
+constexpr bool TranslatedGuest = false;
+#endif
+bool HostFaultOnly(int native) {
+    return TranslatedGuest && native == SIGSEGV;
+}
 bool Delivered(const GuestSigaction& action) {
     return action.handler > 1 && (action.flags & SaSiginfo) == 0;
 }
@@ -162,6 +170,7 @@ bool Install(int guest, const GuestSigaction& action) {
     const int native = NativeSignal(guest);
     if (!native) return true;
     const auto previous = handlers[guest].exchange(Delivered(action) ? reinterpret_cast<GuestHandler>(action.handler) : nullptr);
+    if (HostFaultOnly(native)) return true;
     auto hostHandler = action.handler == 1 ? SIG_IGN : Delivered(action) ? Dispatch : SIG_DFL;
     if (GuestWriteWatch::GuestWriteWatchChainSignal_nid_postfix(native, hostHandler)) return true;
     if (std::signal(native, hostHandler) == SIG_ERR) {
@@ -202,7 +211,7 @@ bool DeliverPendingSignal(int guest) {
     if (action.handler == 1) return false;
     if (action.handler > 1 && !Delivered(action)) throw std::runtime_error("signal: SA_SIGINFO handlers are not delivered");
     const int native = NativeSignal(guest);
-    if (native != 0) {
+    if (native != 0 && !(HostFaultOnly(native) && action.handler > 1)) {
         if (std::raise(native) != 0) throw std::runtime_error("signal: delivering the signal to the host failed");
         return action.handler > 1;
     }
@@ -464,6 +473,10 @@ int APS5_VABI raise_nid_postfix(int guest) {
         return 0;
     }
     const int native = NativeSignal(guest);
+    if (HostFaultOnly(native) && action.handler > 1) {
+        reinterpret_cast<GuestHandler>(action.handler)(guest);
+        return 0;
+    }
     if (native != 0) {
         const int result = std::raise(native);
         if (result) *__error_nid_postfix() = 22;
