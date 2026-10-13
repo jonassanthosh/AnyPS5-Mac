@@ -11,6 +11,12 @@ namespace {
 constexpr std::uint8_t SttFunc = 2;
 constexpr std::uint32_t RX8664Relative = 8;
 
+std::uint64_t ComparedImmediate(const DecodedInstruction& compare) {
+    const auto bits = compare.operands[0].size;
+    const auto value = compare.operands[1].imm.value.u;
+    return bits >= 64 ? value : value & ((std::uint64_t(1) << bits) - 1);
+}
+
 std::string Hex(std::uint64_t value) {
     std::ostringstream stream;
     stream << std::hex << value;
@@ -345,7 +351,7 @@ bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, co
             candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
             Enclosing(candidate.operands[0].reg.value) == indexRegister &&
             candidate.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-            count = candidate.operands[1].imm.value.u + 1;
+            count = ComparedImmediate(candidate) + 1;
             break;
         }
         if (candidate.instruction.mnemonic == ZYDIS_MNEMONIC_BEXTR && candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
@@ -414,7 +420,7 @@ bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, co
             }
             const auto next = function.find(candidate.Next());
             if (next == function.end()) continue;
-            const auto immediate = candidate.operands[1].imm.value.u & 0xffffffffull;
+            const auto immediate = ComparedImmediate(candidate);
             const auto branch = DirectTarget(next->second);
             const bool intoTable = branch && *branch <= jump.address && jump.address - *branch <= 32;
             if (next->second.instruction.mnemonic == ZYDIS_MNEMONIC_JNBE) bound = immediate + 1;
