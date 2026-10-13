@@ -92,6 +92,11 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
 
     resolveDrawDecode(queue, submission, decode, registerKey, drawKey, profile);
     const auto& graphics = decode->state;
+    if (graphics.stages.mesh && !localDevice->MeshShaders()) {
+        static std::once_flag reported;
+        std::call_once(reported, [] { std::fprintf(stderr, "[gpu] the device has no mesh shaders; geometry-path draws are skipped\n"); });
+        return DrawVerdict::Nothing;
+    }
     auto pixel = decode->pixel;
     std::vector<DrawProgram> programs = decode->programs;
     const auto setMeshIndexBuffer = [&](const Pm4::DrawParameters& parameters) {

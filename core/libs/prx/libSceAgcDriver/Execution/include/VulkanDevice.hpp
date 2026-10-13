@@ -47,6 +47,7 @@ public:
     // Distinguishes this device from every earlier one in the process (a memo keyed by the device
     // cannot rely on the pointer, which a replacement may reuse).
     std::uint64_t Serial() const { return serial; }
+    bool MeshShaders() const;
     // The Vulkan device handle (a Recipe names the device it was built on).
     VkDevice Device() const;
     // Drains everything under the caller's GpuMutex: recorder Sync plus vkDeviceWaitIdle. For suspend,
