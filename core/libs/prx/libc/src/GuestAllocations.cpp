@@ -25,6 +25,7 @@
 #include <vector>
 #ifdef __APPLE__
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#include <dlfcn.h>
 #else
 #include <link.h>
 #endif
@@ -431,7 +432,17 @@ std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* p
         const auto finish = base + range.bytes;
         if (finish <= address) continue;
         if (base >= end) break;
-        require(base <= cursor, "guest protection or unmap range has a hole");
+        if (base > cursor) {
+            const char* image = "no image";
+#ifdef __APPLE__
+            Dl_info info{};
+            if (::dladdr(reinterpret_cast<const void*>(cursor), &info) != 0 && info.dli_fname != nullptr) image = info.dli_fname;
+#endif
+            char message[512];
+            std::snprintf(message, sizeof(message), "guest protection or unmap range has a hole: range 0x%llx+0x%zx, unregistered 0x%llx-0x%llx in %s",
+                static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(base), image);
+            throw std::runtime_error(message);
+        }
         replacement.erase(base);
         const auto insert = [&](std::uint64_t first, std::uint64_t last, bool canRead, bool canWrite, bool gpuMapped) {
             if (first < last) replacement.emplace(first, std::make_shared<const Range>(Range{first, static_cast<std::size_t>(last - first), canRead, canWrite, range.allocationAddress, range.allocationBytes, range.releasable, gpuMapped}));
