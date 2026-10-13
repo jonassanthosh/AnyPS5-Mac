@@ -229,6 +229,7 @@ struct SpirvTarget {
     std::uint32_t srgbDecodeFormats = 0;
     bool narrowSubgroupClock = false;
     std::uint32_t subgroupStages = 0xffffffffu;
+    bool relaxedFloat = false;
     bool fixedPushSlots = false;
     bool float64DenormPreserve = false;
     bool registrationModules = false;
