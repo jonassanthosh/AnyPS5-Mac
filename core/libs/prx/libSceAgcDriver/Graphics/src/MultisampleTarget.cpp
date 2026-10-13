@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -325,7 +326,11 @@ void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const 
         if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
         char text[256];
         std::snprintf(text, sizeof(text), "AGC graphics: %s of 0x%llx+0x%zx overlaps multisampled color target 0x%llx+0x%llx (%u samples), whose samples are only on the host: guest access to it is not implemented", access, static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(range.address), static_cast<unsigned long long>(range.bytes), range.samples);
-        throw std::runtime_error(text);
+        static const bool allowed = std::getenv("APS5_ALLOW_MSAA_GUEST_ACCESS") != nullptr;
+        if (!allowed) throw std::runtime_error(text);
+        static std::atomic<int> reports{0};
+        if (reports.fetch_add(1) < 8) std::fprintf(stderr, "[gpu] %s; continuing (APS5_ALLOW_MSAA_GUEST_ACCESS)\n", text);
+        return;
     }
 }
 
