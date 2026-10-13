@@ -115,6 +115,28 @@ The eboot imports 597 functions from 39 modules, led by `libc` (159), `libScePos
 
 All but 5 of the eboot's 597 imports resolve against the arm64 libraries. The title runs through Unity's start-up, its argument and launcher output, and into loading `Il2CppUserAssemblies.prx` (10.5 million instructions) and the other Unity modules.
 
+## Playing a game
+
+A game folder is a PS5 dump with `sce_sys/param.json` and a decrypted `eboot.bin`, either beside it or in a `decrypted` subfolder. Its bundled `.prx` and `.sprx` modules that `build-arm64` has no library for are translated with it.
+
+### The AnyPS5 app
+
+```sh
+tools/macos/build_launcher_app.sh
+open build-launcher/AnyPS5.app
+```
+
+Add a game with the + button or by dropping its folder on the window, press Prepare, then Play. Preparing a game the first time takes about 30 to 40 minutes, almost all of it compiling; preparing it again after a translator or runtime change keeps every compiled shard whose source did not change. The app uses the checkout it was built from (Settings can point it at another), which needs `build-arm64` configured and `ninja`, `cmake` and Xcode's command line tools.
+
+### From a terminal
+
+```sh
+tools/macos/title.py build <game folder>
+tools/macos/title.py run <game folder>
+```
+
+Both keep their files in `~/Library/Application Support/AnyPS5/Titles/<title id>`: the linked `title` executable, the translated sources and objects in `build`, and in `run` the guest's working directory with its `app0` link to the game, save data and shader caches. `build` prints `progress <phase> <done> <total>` lines for the app and rebuilds only what changed; `--force` translates again even when nothing did.
+
 ## Not covered
 
 - A JIT fallback for runtime-generated code and undiscovered indirect targets.
