@@ -539,6 +539,14 @@ void decideImportWatch(const Context& context, HostImports& state) {
     state.dmaBufImportsStampPages = false;
     if (context.hostImportAlignment != 0 && GuestMemory::WriteWatched()) std::fprintf(stderr, "[write-watch] Windows direct host imports use comparisons; separate shared aliases retain guest write tracking\n");
 #else
+#ifdef __APPLE__
+    state.watchDevice = context.device;
+    state.unwatchImports = importWatchRequest() == ImportWatchRequest::Unwatch;
+    state.unwatchDmaBufImports = false;
+    state.importsStampPages = true;
+    state.dmaBufImportsStampPages = true;
+    return;
+#endif
     const auto request = importWatchRequest();
     state.watchDevice = context.device;
     state.unwatchImports = false;
@@ -749,7 +757,13 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     VkResult result = VK_SUCCESS;
     const char* step = nullptr;
     GuestMemory::ImportWatched(base, bytes, [&] {
+#ifdef __APPLE__
+        GuestWriteWatch::GuestWriteWatchOpenImport_nid_postfix(reinterpret_cast<const void*>(base), static_cast<std::size_t>(bytes));
         step = createImport(context, entry, result);
+        GuestWriteWatch::GuestWriteWatchCloseImport_nid_postfix(reinterpret_cast<const void*>(base), static_cast<std::size_t>(bytes));
+#else
+        step = createImport(context, entry, result);
+#endif
         return step == nullptr;
     });
     entry.unwatched = step == nullptr && (entry.dmaBuf ? state.unwatchDmaBufImports : state.unwatchImports);

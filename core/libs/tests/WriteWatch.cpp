@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
+#include <csignal>
 #include <cstring>
 #include <set>
 #include <stdexcept>
@@ -228,11 +229,76 @@ void CheckThreads() {
     Require(region.Collect().empty(), "writes are reported after the writers stopped");
 }
 
+void CheckHot() {
+    Region region(2);
+    GuestWriteWatchRegister_nid_postfix(region.base, region.bytes);
+    Require(region.Collect() == All(2), "a new range is not reported in full");
+    for (int round = 1; round <= 6; ++round) {
+        region.base[0] = static_cast<std::uint8_t>(round);
+        Require(region.Collect() == std::set<std::size_t>({0}), "a page written every collection is not reported");
+    }
+    for (int round = 0; round < 3; ++round) Require(region.Collect().empty(), "an unchanged hot page is reported");
+    region.base[region.page - 1] = 0x5a;
+    Require(region.Collect() == std::set<std::size_t>({0}), "a write to a hot page is not reported");
+    Require(region.Collect().empty(), "a hot page is reported twice for one write");
+    Require(::mprotect(region.base, region.page, PROT_NONE) == 0, "cannot take the hot page's access away");
+    Require(region.Collect() == std::set<std::size_t>({0}), "an unreadable hot page does not read as written");
+    Require(::mprotect(region.base, region.page, PROT_READ | PROT_WRITE) == 0, "cannot give the page its access back");
+    GuestWriteWatchProtectionChanged_nid_postfix(region.base, region.page, PROT_READ | PROT_WRITE);
+    Require(region.Collect() == std::set<std::size_t>({0}), "a protection change is not reported");
+    for (int round = 1; round <= 6; ++round) {
+        region.base[0] = static_cast<std::uint8_t>(round + 10);
+        Require(region.Collect() == std::set<std::size_t>({0}), "a page written every collection is not reported");
+    }
+    for (int round = 0; round < 300; ++round) Require(region.Collect().empty(), "an unchanged hot page is reported");
+    region.base[1] = 7;
+    Require(region.Collect() == std::set<std::size_t>({0}), "a write after the page cooled down is not reported");
+    for (int round = 1; round <= 6; ++round) {
+        region.base[0] = static_cast<std::uint8_t>(round + 20);
+        Require(region.Collect() == std::set<std::size_t>({0}), "a page written every collection is not reported");
+    }
+    const auto before = region.base[0];
+    GuestWriteWatchHostWrites_nid_postfix(region.base, region.page);
+    Require(::mprotect(region.base, region.page, PROT_READ | PROT_WRITE) == 0, "cannot open the page for the host store");
+    region.base[0] = static_cast<std::uint8_t>(before + 1);
+    Require(::mprotect(region.base, region.page, PROT_READ) == 0, "cannot restore the watch's protection");
+    Require(region.Collect().empty(), "a host store into a page announced by HostWrites reads as a guest write");
+    region.base[0] = before;
+    Require(region.Collect() == std::set<std::size_t>({0}), "a guest store restoring the bytes a hot page had before a host store is not reported");
+}
+
+std::uint8_t* g_chainPage = nullptr;
+std::size_t g_chainBytes = 0;
+volatile int g_chainCalls = 0;
+
+void ChainedHandler(int) {
+    ++g_chainCalls;
+    ::mprotect(g_chainPage, g_chainBytes, PROT_READ | PROT_WRITE);
+}
+
+void CheckChain() {
+    Region region(2);
+    GuestWriteWatchRegister_nid_postfix(region.base, region.bytes);
+    Require(region.Collect() == All(2), "a new range is not reported in full");
+    Region foreign(1);
+    g_chainPage = foreign.base;
+    g_chainBytes = foreign.bytes;
+    Require(GuestWriteWatchChainSignal_nid_postfix(SIGSEGV, &ChainedHandler), "the watch does not take a SIGSEGV disposition");
+    Require(GuestWriteWatchChainSignal_nid_postfix(SIGBUS, &ChainedHandler), "the watch does not take a SIGBUS disposition");
+    Require(!GuestWriteWatchChainSignal_nid_postfix(SIGUSR1, &ChainedHandler), "the watch took a signal it does not own");
+    region.base[region.page + 3] = 9;
+    Require(g_chainCalls == 0, "a fault on a watched page reached the chained handler");
+    Require(region.Collect() == std::set<std::size_t>({1}), "a write after chaining a handler is not reported");
+    Require(::mprotect(foreign.base, foreign.bytes, PROT_READ) == 0, "cannot protect the foreign page");
+    foreign.base[0] = 1;
+    Require(g_chainCalls == 1 && foreign.base[0] == 1, "a fault outside the watch did not reach the chained handler");
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
-        Require(argc == 2, "expected collect, fresh, armed, register, mapped, host, protection or threads");
+        Require(argc == 2, "expected collect, fresh, armed, register, mapped, host, protection, threads, hot or chain");
         const std::string_view mode(argv[1]);
         if (mode == "collect") CheckCollect();
         else if (mode == "fresh") CheckFresh();
@@ -242,6 +308,8 @@ int main(int argc, char** argv) {
         else if (mode == "host") CheckHostWrite();
         else if (mode == "protection") CheckProtection();
         else if (mode == "threads") CheckThreads();
+        else if (mode == "hot") CheckHot();
+        else if (mode == "chain") CheckChain();
         else throw std::runtime_error("unknown write watch test");
         std::printf("write watch %s passed\n", argv[1]);
         return 0;

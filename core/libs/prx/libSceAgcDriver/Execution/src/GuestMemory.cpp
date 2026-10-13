@@ -1346,7 +1346,13 @@ std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> so
 #ifndef _WIN32
         if (GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix() && GuestArena::GuestArenaWriteSharedBacking_nid_no_patch(address, source.data(), source.size())) return;
 #endif
+#ifdef __APPLE__
+        GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(reinterpret_cast<const void*>(address), source.size());
         std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
+        GuestWriteWatch::GuestWriteWatchEndHostWrite_nid_postfix(reinterpret_cast<const void*>(address), source.size());
+#else
+        std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
+#endif
     });
 }
 
@@ -1362,6 +1368,7 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
     }
 #ifndef _WIN32
     {
+        GuestWriteWatch::GuestWriteWatchHostWrites_nid_postfix(reinterpret_cast<const void*>(address), bytes);
         const auto blockFirst = address & ~(std::uint64_t{WriteBlockBytes} - 1);
         const auto blockStop = (address + bytes + WriteBlockBytes - 1) & ~(std::uint64_t{WriteBlockBytes} - 1);
         StampRuns runs{tracker, StampKind::Fresh};
@@ -2002,8 +2009,8 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     auto* destination = reinterpret_cast<void*>(address);
     CheckRange(destination, source.size(), alignment, true);
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
-    if (source.size() >= PageBytes) StoreOwnBytes(address, source);
-    else StoreOwnBytes(address, source.size(), [&] { std::memcpy(destination, source.data(), source.size()); });
+    StoreOwnBytes(address, source);
+    static_cast<void>(destination);
 }
 
 }

@@ -29,9 +29,14 @@
 #include <cstring>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <memory>
+#include <pthread.h>
 #include <sched.h>
+#include <setjmp.h>
 #include <sys/mman.h>
+#include <type_traits>
 #include <unistd.h>
+#include <unordered_map>
 #endif
 
 #if (defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)) || defined(__APPLE__)
@@ -360,7 +365,8 @@ public:
             else state = static_cast<std::uint8_t>(state & ~Protected);
         });
         erase(begin, end);
-        _ranges.emplace(begin, Range{end, std::move(pages)});
+        const auto count = pages.size();
+        _ranges.emplace(begin, Range{end, std::move(pages), std::vector<std::uint8_t>(count, 0)});
     }
 
     bool Unregister(std::uintptr_t begin, std::uintptr_t end) {
@@ -388,16 +394,38 @@ public:
         {
             const Lock lock(_lock);
             if (take != Take::Fresh && !covers(begin, end)) return false;
-            forEachPage(begin, end, [&](std::uintptr_t page, std::uint8_t& state) {
-                if ((state & Written) == 0) return;
+            forEachPage(begin, end, [&](std::uintptr_t page, std::uint8_t& state, std::uint8_t& heat) {
                 const bool fresh = (state & Fresh) != 0;
                 if ((take == Take::Armed && fresh) || (take == Take::Fresh && !fresh)) return;
+                if ((state & (Hot | Written)) == Hot) {
+                    if (differs(page)) {
+                        state |= Written;
+                    } else {
+                        if (++heat != 0) return;
+                        if (!cool(page, state, heat)) return;
+                    }
+                }
+                if ((state & Written) == 0) return;
                 state &= static_cast<std::uint8_t>(~Fresh);
                 if (!runs.empty() && runs.back().second == page) runs.back().second = page + _page;
                 else runs.emplace_back(page, page + _page);
                 for (const auto& [first, last] : _hostWrites)
                     if (page >= first && page < last) return;
                 state &= static_cast<std::uint8_t>(~Written);
+                const bool open = (state & (PROT_READ | PROT_WRITE)) == (PROT_READ | PROT_WRITE);
+                if (open && ((state & Hot) != 0 || heat >= HotFaults)) {
+                    if ((state & Hot) == 0) _snapshots[page] = std::make_unique<std::uint8_t[]>(_page);
+                    if (snapshot(page)) {
+                        state |= Hot;
+                        heat = HotFaults;
+                        return;
+                    }
+                    _snapshots.erase(page);
+                    state = static_cast<std::uint8_t>((state & ~Hot) | Written);
+                    heat = 0;
+                    return;
+                }
+                state &= static_cast<std::uint8_t>(~Hot);
                 if ((state & PROT_WRITE) != 0) state |= Protected;
             });
             for (const auto& [first, last] : runs) protect(first, last);
@@ -406,12 +434,32 @@ public:
         return true;
     }
 
+    void HostWrites(std::uintptr_t begin, std::uintptr_t end) {
+        begin = pageStart(begin);
+        end = pageEnd(end);
+        if (!_available || end <= begin) return;
+        const Lock lock(_lock);
+        forEachPage(begin, end, [&](std::uintptr_t page, std::uint8_t& state, std::uint8_t& heat) {
+            if ((state & Hot) != 0) cool(page, state, heat);
+        });
+    }
+
+    bool ChainSignal(int signal, void (*handler)(int)) {
+        if (!_available || (signal != SIGSEGV && signal != SIGBUS)) return false;
+        struct sigaction chained {};
+        chained.sa_handler = handler;
+        sigemptyset(&chained.sa_mask);
+        (signal == SIGBUS ? _previousBus : _previousSegv) = chained;
+        return true;
+    }
+
     void ProtectionChanged(std::uintptr_t begin, std::uintptr_t end, int protection) {
         begin = pageStart(begin);
         end = pageEnd(end);
         if (!_available || end <= begin) return;
         const Lock lock(_lock);
-        forEachPage(begin, end, [&](std::uintptr_t, std::uint8_t& state) {
+        forEachPage(begin, end, [&](std::uintptr_t page, std::uint8_t& state) {
+            if ((state & Hot) != 0) _snapshots.erase(page);
             state = static_cast<std::uint8_t>(Written | (state & Fresh) | (protection & ProtectionMask));
         });
     }
@@ -437,6 +485,31 @@ public:
         if (found != _hostWrites.end()) _hostWrites.erase(found);
     }
 
+    void OpenImport(std::uintptr_t begin, std::uintptr_t end) {
+        begin = pageStart(begin);
+        end = pageEnd(end);
+        if (!_available || end <= begin) return;
+        const Lock lock(_lock);
+        forEachPage(begin, end, [&](std::uintptr_t page, std::uint8_t& state) {
+            if ((state & Protected) == 0) return;
+            ::mprotect(reinterpret_cast<void*>(page), _page, state & ProtectionMask);
+            state = static_cast<std::uint8_t>((state & ~Protected) | Opened);
+        });
+    }
+
+    void CloseImport(std::uintptr_t begin, std::uintptr_t end) {
+        begin = pageStart(begin);
+        end = pageEnd(end);
+        if (!_available || end <= begin) return;
+        const Lock lock(_lock);
+        forEachPage(begin, end, [&](std::uintptr_t, std::uint8_t& state) {
+            if ((state & Opened) == 0) return;
+            state = static_cast<std::uint8_t>(state & ~Opened);
+            if ((state & (Written | PROT_WRITE)) == PROT_WRITE) state |= Protected;
+        });
+        protect(begin, end);
+    }
+
     int Protection(std::uintptr_t address, std::uintptr_t limit, std::uintptr_t* runEnd) {
         const auto page = pageStart(address);
         const Lock lock(_lock);
@@ -459,10 +532,16 @@ private:
     static constexpr std::uint8_t Written = 0x10;
     static constexpr std::uint8_t Protected = 0x20;
     static constexpr std::uint8_t Fresh = 0x40;
+    static constexpr std::uint8_t Opened = 0x80;
+
+    static constexpr std::uint8_t Hot = 0x08;
+    static constexpr std::uint8_t HotFaults = 4;
+    static inline thread_local sigjmp_buf* t_reading = nullptr;
 
     struct Range {
         std::uintptr_t end;
         std::vector<std::uint8_t> pages;
+        std::vector<std::uint8_t> heat;
     };
 
     struct Turns {
@@ -495,6 +574,14 @@ private:
     }
 
     static void fault(int signal, siginfo_t* info, void* context) {
+        if (t_reading != nullptr) {
+            sigset_t faults;
+            sigemptyset(&faults);
+            sigaddset(&faults, SIGSEGV);
+            sigaddset(&faults, SIGBUS);
+            pthread_sigmask(SIG_UNBLOCK, &faults, nullptr);
+            siglongjmp(*t_reading, 1);
+        }
         auto& watch = Get();
         if (watch.record(reinterpret_cast<std::uintptr_t>(info->si_addr))) return;
         const auto& previous = signal == SIGBUS ? watch._previousBus : watch._previousSegv;
@@ -518,11 +605,44 @@ private:
         if (page >= it->second.end) return false;
         auto& state = it->second.pages[(page - it->first) / _page];
         if ((state & Protected) != 0) {
+            auto& heat = it->second.heat[(page - it->first) / _page];
+            if (heat < HotFaults) ++heat;
             state = static_cast<std::uint8_t>((state & (ProtectionMask | Fresh)) | Written);
             ::mprotect(reinterpret_cast<void*>(page), _page, state & ProtectionMask);
             return true;
         }
         return (state & PROT_WRITE) != 0;
+    }
+
+    template <typename TFunction>
+    bool guarded(TFunction function) {
+        sigjmp_buf jump;
+        if (sigsetjmp(jump, 0) != 0) {
+            t_reading = nullptr;
+            return false;
+        }
+        t_reading = &jump;
+        function();
+        t_reading = nullptr;
+        return true;
+    }
+
+    bool differs(std::uintptr_t page) {
+        bool same = false;
+        return !guarded([&] { same = std::memcmp(reinterpret_cast<const void*>(page), _snapshots.at(page).get(), _page) == 0; }) || !same;
+    }
+
+    bool cool(std::uintptr_t page, std::uint8_t& state, std::uint8_t& heat) {
+        ::mprotect(reinterpret_cast<void*>(page), _page, state & ProtectionMask & ~PROT_WRITE);
+        const bool changed = differs(page);
+        _snapshots.erase(page);
+        state = static_cast<std::uint8_t>((state & ~Hot) | Protected | (changed ? Written : 0));
+        heat = HotFaults - 1;
+        return changed;
+    }
+
+    bool snapshot(std::uintptr_t page) {
+        return guarded([&] { std::memcpy(_snapshots.at(page).get(), reinterpret_cast<const void*>(page), _page); });
     }
 
     std::uintptr_t pageStart(std::uintptr_t address) const {
@@ -540,7 +660,11 @@ private:
         for (; it != _ranges.end() && it->first < end; ++it) {
             const auto first = std::max(begin, it->first);
             const auto last = std::min(end, it->second.end);
-            for (auto page = first; page < last; page += _page) function(page, it->second.pages[(page - it->first) / _page]);
+            for (auto page = first; page < last; page += _page) {
+                const auto index = (page - it->first) / _page;
+                if constexpr (std::is_invocable_v<TFunction, std::uintptr_t, std::uint8_t&, std::uint8_t&>) function(page, it->second.pages[index], it->second.heat[index]);
+                else function(page, it->second.pages[index]);
+            }
         }
     }
 
@@ -589,15 +713,19 @@ private:
             }
             removed = true;
             auto pages = std::move(it->second.pages);
+            auto heat = std::move(it->second.heat);
             it = _ranges.erase(it);
             const auto cutBegin = std::max(begin, rangeBegin);
             const auto cutEnd = std::min(end, rangeEnd);
             for (auto page = cutBegin; page < cutEnd; page += _page) {
                 const auto state = pages[(page - rangeBegin) / _page];
                 if ((state & Protected) != 0) ::mprotect(reinterpret_cast<void*>(page), _page, state & ProtectionMask);
+                if ((state & Hot) != 0) _snapshots.erase(page);
             }
-            if (rangeBegin < cutBegin) _ranges.emplace(rangeBegin, Range{cutBegin, std::vector<std::uint8_t>(pages.begin(), pages.begin() + (cutBegin - rangeBegin) / _page)});
-            if (cutEnd < rangeEnd) it = _ranges.emplace(cutEnd, Range{rangeEnd, std::vector<std::uint8_t>(pages.begin() + (cutEnd - rangeBegin) / _page, pages.end())}).first;
+            const auto head = static_cast<std::ptrdiff_t>((cutBegin - rangeBegin) / _page);
+            const auto tail = static_cast<std::ptrdiff_t>((cutEnd - rangeBegin) / _page);
+            if (rangeBegin < cutBegin) _ranges.emplace(rangeBegin, Range{cutBegin, std::vector<std::uint8_t>(pages.begin(), pages.begin() + head), std::vector<std::uint8_t>(heat.begin(), heat.begin() + head)});
+            if (cutEnd < rangeEnd) it = _ranges.emplace(cutEnd, Range{rangeEnd, std::vector<std::uint8_t>(pages.begin() + tail, pages.end()), std::vector<std::uint8_t>(heat.begin() + tail, heat.end())}).first;
         }
         return removed;
     }
@@ -606,6 +734,7 @@ private:
     bool _available = false;
     Turns _lock;
     std::map<std::uintptr_t, Range> _ranges;
+    std::unordered_map<std::uintptr_t, std::unique_ptr<std::uint8_t[]>> _snapshots;
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _hostWrites;
     struct sigaction _previousBus {};
     struct sigaction _previousSegv {};
@@ -678,6 +807,26 @@ void GuestWriteWatchBeginHostWrite_nid_postfix(const void* pointer, std::size_t 
 #endif
 }
 
+void GuestWriteWatchOpenImport_nid_postfix(const void* pointer, std::size_t bytes) {
+#if defined(__APPLE__)
+    const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
+    Watch::Get().OpenImport(begin, begin + bytes);
+#else
+    static_cast<void>(pointer);
+    static_cast<void>(bytes);
+#endif
+}
+
+void GuestWriteWatchCloseImport_nid_postfix(const void* pointer, std::size_t bytes) {
+#if defined(__APPLE__)
+    const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
+    Watch::Get().CloseImport(begin, begin + bytes);
+#else
+    static_cast<void>(pointer);
+    static_cast<void>(bytes);
+#endif
+}
+
 void GuestWriteWatchEndHostWrite_nid_postfix(const void* pointer, std::size_t bytes) {
 #if defined(__APPLE__)
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
@@ -685,6 +834,26 @@ void GuestWriteWatchEndHostWrite_nid_postfix(const void* pointer, std::size_t by
 #else
     static_cast<void>(pointer);
     static_cast<void>(bytes);
+#endif
+}
+
+void GuestWriteWatchHostWrites_nid_postfix(const void* pointer, std::size_t bytes) {
+#if defined(__APPLE__)
+    const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
+    Watch::Get().HostWrites(begin, begin + bytes);
+#else
+    static_cast<void>(pointer);
+    static_cast<void>(bytes);
+#endif
+}
+
+bool GuestWriteWatchChainSignal_nid_postfix(int signal, void (*handler)(int)) {
+#if defined(__APPLE__)
+    return Watch::Get().ChainSignal(signal, handler);
+#else
+    static_cast<void>(signal);
+    static_cast<void>(handler);
+    return false;
 #endif
 }
 
