@@ -3,6 +3,7 @@ import Foundation
 
 enum GameState: Equatable {
     case missing
+    case unusable(String)
     case unprepared
     case preparing(phase: String, done: Int, total: Int, started: Date)
     case ready
@@ -56,6 +57,13 @@ final class GameEntry: ObservableObject, Identifiable {
         }
     }
 
+    var canPrepare: Bool {
+        switch state {
+        case .missing, .unusable, .preparing, .running: return false
+        default: return true
+        }
+    }
+
     func replace(_ newInfo: GameInfo) {
         guard !busy else { return }
         info = newInfo
@@ -70,6 +78,8 @@ final class GameEntry: ObservableObject, Identifiable {
     private func settle() {
         if !FileManager.default.fileExists(atPath: info.root.appendingPathComponent("sce_sys/param.json").path) {
             state = .missing
+        } else if let problem = info.problem {
+            state = .unusable(problem)
         } else {
             state = prepared ? .ready : .unprepared
         }

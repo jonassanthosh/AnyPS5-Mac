@@ -29,11 +29,20 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem {
                 Button {
+                    library.rescan()
+                } label: {
+                    Label("Rescan Folders", systemImage: "arrow.clockwise")
+                }
+                .help("Look for new games in your game folders")
+                .disabled(library.folders.isEmpty || library.scanning)
+            }
+            ToolbarItem {
+                Button {
                     library.chooseGame()
                 } label: {
-                    Label("Add Game", systemImage: "plus")
+                    Label("Add Games", systemImage: "plus")
                 }
-                .help("Add a PS5 game folder")
+                .help("Add a PS5 game folder, or a folder of games")
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $dropping) { providers in
@@ -66,11 +75,11 @@ struct EmptyLibrary: View {
         VStack(spacing: 16) {
             Image(systemName: "gamecontroller").font(.system(size: 56)).foregroundStyle(.secondary)
             Text("Add a game to get started").font(.title2)
-            Text("Drop a PS5 game folder here, or choose one. It must contain sce_sys/param.json and a decrypted eboot.bin.")
+            Text("Drop a PS5 game folder here, or a folder of games to add every game in it. AnyPS5 remembers the folder and picks up games you add to it later.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
-            Button("Add Game…") { library.chooseGame() }.controlSize(.large)
+            Button("Add Games…") { library.chooseGame() }.controlSize(.large)
         }
         .padding()
     }
@@ -113,6 +122,7 @@ struct GameRow: View {
     private var summary: String {
         switch entry.state {
         case .missing: return "Folder not found"
+        case .unusable: return "Can't be prepared"
         case .unprepared: return "Not prepared"
         case .preparing(let phase, let done, let total, _): return Phase.describe(phase, done, total)
         case .ready: return "Ready to play"
@@ -164,7 +174,7 @@ struct GameDetail: View {
         .toolbar {
             ToolbarItem {
                 Menu {
-                    Button("Prepare Again") { entry.prepare(force: true) }.disabled(entry.busy || entry.state == .missing)
+                    Button("Prepare Again") { entry.prepare(force: true) }.disabled(!entry.canPrepare)
                     Button("Open Build Log") { entry.openLog(entry.buildLog) }
                     Button("Open Game Log") { entry.openLog(entry.runLog) }
                     Button("Show Saves and Build Files") { entry.revealBuild() }
@@ -202,6 +212,8 @@ struct GameDetail: View {
         case .missing:
             Notice(symbol: "folder.badge.questionmark", title: "Game folder not found", text: "Reconnect the drive or add the folder again.")
             Button("Locate…") { library.chooseGame() }
+        case .unusable(let reason):
+            Notice(symbol: "lock.fill", title: "This dump can't be prepared", text: reason, tint: .orange)
         case .unprepared:
             Notice(symbol: "hammer", title: "Prepare this game", text: "Preparing translates the game to run natively on this Mac. The first time takes about 30–40 minutes; later updates are much faster.")
             Button {
@@ -318,6 +330,19 @@ struct SettingsView: View {
             Text("Games are translated with the tools in this checkout. It needs build-arm64 configured and Xcode's command line tools, ninja and cmake installed.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Section("Game folders") {
+                if library.folders.isEmpty {
+                    Text("None yet. Add a folder of games to have new games appear automatically.").foregroundStyle(.secondary)
+                }
+                ForEach(library.folders, id: \.self) { folder in
+                    HStack {
+                        Text(folder.path).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Button("Remove") { library.removeFolder(folder) }
+                    }
+                }
+                Button("Add Folder…") { library.chooseGame() }
+            }
             LabeledContent("Saves and builds") {
                 Button("Show in Finder") {
                     try? FileManager.default.createDirectory(at: Paths.titles, withIntermediateDirectories: true)

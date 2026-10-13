@@ -29,6 +29,9 @@ final class Library: ObservableObject {
     @Published private(set) var games: [GameEntry] = []
     @Published var selection: GameEntry.ID?
     @Published var problem: String?
+    @Published private(set) var folders: [URL] = []
+    @Published private(set) var scanning = false
+    private var hidden = Set(UserDefaults.standard.stringArray(forKey: "hidden") ?? [])
     @Published var repository: URL? {
         didSet { UserDefaults.standard.set(repository?.path, forKey: "repository") }
     }
@@ -39,7 +42,9 @@ final class Library: ObservableObject {
         } else {
             repository = Paths.defaultRepository()
         }
+        folders = (UserDefaults.standard.stringArray(forKey: "folders") ?? []).map { URL(fileURLWithPath: $0) }
         load()
+        rescan()
     }
 
     var selected: GameEntry? {
@@ -47,27 +52,92 @@ final class Library: ObservableObject {
     }
 
     func add(_ url: URL) {
-        do {
-            let info = try GameInspector.inspect(url)
-            if let existing = games.first(where: { $0.info.titleID == info.titleID }) {
-                if existing.info.root != info.root { existing.replace(info) }
-                selection = existing.id
-            } else {
-                let entry = GameEntry(info: info, library: self)
-                games.append(entry)
-                games.sort { $0.info.name.localizedCaseInsensitiveCompare($1.info.name) == .orderedAscending }
-                selection = entry.id
+        if GameInspector.root(of: url) != nil {
+            do {
+                let info = try GameInspector.inspect(url)
+                hide(info.titleID, false)
+                selection = insert(info).id
+                save()
+            } catch {
+                problem = error.localizedDescription
             }
-            save()
-        } catch {
-            problem = error.localizedDescription
+        } else {
+            addFolder(url)
         }
+    }
+
+    func addFolder(_ url: URL) {
+        let folder = url.standardizedFileURL
+        if !folders.contains(folder) {
+            folders.append(folder)
+            UserDefaults.standard.set(folders.map(\.path), forKey: "folders")
+        }
+        scan([folder], report: true)
+    }
+
+    func removeFolder(_ url: URL) {
+        folders.removeAll { $0 == url }
+        UserDefaults.standard.set(folders.map(\.path), forKey: "folders")
+    }
+
+    func rescan() {
+        games.forEach { $0.refresh() }
+        scan(folders, report: false)
+    }
+
+    private func scan(_ roots: [URL], report: Bool) {
+        guard !roots.isEmpty else { return }
+        scanning = true
+        Task.detached(priority: .userInitiated) {
+            var found: [GameInfo] = []
+            var failures: [String] = []
+            for root in roots {
+                for game in GameInspector.scan(root) {
+                    do {
+                        found.append(try GameInspector.inspect(game))
+                    } catch {
+                        failures.append(error.localizedDescription)
+                    }
+                }
+            }
+            await MainActor.run { [found, failures] in
+                self.scanning = false
+                let before = self.games.count
+                found.filter { !self.hidden.contains($0.titleID) }.forEach { _ = self.insert($0) }
+                self.save()
+                if self.selection == nil { self.selection = self.games.first?.id }
+                guard report else { return }
+                if found.isEmpty {
+                    self.problem = failures.first ?? "No PS5 games were found in \(roots.map(\.lastPathComponent).joined(separator: ", ")). A game folder contains sce_sys/param.json."
+                } else if self.games.count == before {
+                    self.problem = "Every game in that folder is already in the library."
+                }
+            }
+        }
+    }
+
+    private func hide(_ titleID: String, _ hiding: Bool) {
+        if hiding { hidden.insert(titleID) } else { hidden.remove(titleID) }
+        UserDefaults.standard.set(Array(hidden).sorted(), forKey: "hidden")
+    }
+
+    @discardableResult
+    private func insert(_ info: GameInfo) -> GameEntry {
+        if let existing = games.first(where: { $0.info.titleID == info.titleID }) {
+            if existing.info.root != info.root || existing.state == .missing { existing.replace(info) }
+            return existing
+        }
+        let entry = GameEntry(info: info, library: self)
+        games.append(entry)
+        games.sort { $0.info.name.localizedCaseInsensitiveCompare($1.info.name) == .orderedAscending }
+        return entry
     }
 
     func remove(_ entry: GameEntry, deletingBuild: Bool) {
         entry.cancel()
         entry.stop()
         if deletingBuild { try? FileManager.default.removeItem(at: entry.folder) }
+        hide(entry.info.titleID, true)
         games.removeAll { $0 === entry }
         if selection == entry.id { selection = games.first?.id }
         save()
@@ -75,7 +145,7 @@ final class Library: ObservableObject {
 
     func chooseGame() {
         let panel = NSOpenPanel()
-        panel.message = "Choose a PS5 game folder (the folder that contains sce_sys)."
+        panel.message = "Choose a PS5 game folder, or a folder of games to add them all."
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true

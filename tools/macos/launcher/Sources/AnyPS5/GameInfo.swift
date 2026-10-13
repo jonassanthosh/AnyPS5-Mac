@@ -7,6 +7,7 @@ struct GameInfo: Equatable {
     let name: String
     let version: String
     let icon: NSImage?
+    var problem: String? = nil
 
     static func == (left: GameInfo, right: GameInfo) -> Bool {
         left.root == right.root && left.titleID == right.titleID
@@ -51,6 +52,37 @@ enum GameInspector {
         let name = names["titleName"] as? String ?? titleID
         let version = parameters["contentVersion"] as? String ?? ""
         let icon = NSImage(contentsOf: root.appendingPathComponent("sce_sys/icon0.png"))
-        return GameInfo(root: root, titleID: titleID, name: name, version: version, icon: icon)
+        return GameInfo(root: root, titleID: titleID, name: name, version: version, icon: icon, problem: executableProblem(root))
+    }
+
+    static func executableProblem(_ root: URL) -> String? {
+        var signed = false
+        for folder in [root.appendingPathComponent("decrypted"), root] {
+            let eboot = folder.appendingPathComponent("eboot.bin")
+            if isElf(eboot) { return nil }
+            if isElf(eboot.appendingPathExtension("esbak")) { return "eboot.bin is signed. Restore the decrypted eboot.bin from eboot.bin.esbak." }
+            if FileManager.default.fileExists(atPath: eboot.path) { signed = true }
+        }
+        return signed ? "eboot.bin is encrypted. AnyPS5 needs a decrypted dump." : "The folder has no eboot.bin."
+    }
+
+    static func isElf(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: 4)) == Data([0x7f, 0x45, 0x4c, 0x46])
+    }
+
+    static func scan(_ folder: URL, depth: Int = 4) -> [URL] {
+        if FileManager.default.fileExists(atPath: folder.appendingPathComponent("sce_sys/param.json").path) {
+            return [folder.standardizedFileURL]
+        }
+        guard depth > 0, let children = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey], options: [.skipsHiddenFiles]) else { return [] }
+        var found: [URL] = []
+        for child in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+            guard values?.isDirectory == true, values?.isPackage != true else { continue }
+            found += scan(child, depth: depth - 1)
+        }
+        return found
     }
 }

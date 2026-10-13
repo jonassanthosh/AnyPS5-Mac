@@ -23,7 +23,7 @@ struct AnyPS5App: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Add Game…") { library.chooseGame() }.keyboardShortcut("o")
+                Button("Add Games…") { library.chooseGame() }.keyboardShortcut("o")
             }
         }
         Settings {
