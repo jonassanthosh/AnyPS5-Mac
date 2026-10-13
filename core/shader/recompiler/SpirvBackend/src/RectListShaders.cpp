@@ -107,7 +107,7 @@ public:
         }
         const auto position3 = interpolate(positions[0], positions[1], positions[2], barycentric);
         valid = result(spv::OpLogicalAnd, boolType, valid, isFinite(position3));
-        rejectInvalidRectangle(valid);
+        rejectInvalidRectangle(valid, positions);
         auto vertexIndex = result(spv::OpSelect, intType, edgeVertex[2], intConstant(2), intConstant(0));
         vertexIndex = result(spv::OpSelect, intType, edgeVertex[1], intConstant(1), vertexIndex);
         const auto fourth = result(spv::OpIEqual, boolType, invocation, intConstant(3));
@@ -184,7 +184,7 @@ private:
         return access(pointer(spv::StorageClassStorageBuffer, uintType), fault, uintConstant(0), uintConstant(index));
     }
 
-    void rejectInvalidRectangle(std::uint32_t valid) {
+    void rejectInvalidRectangle(std::uint32_t valid, const std::array<std::uint32_t, 3>& positions) {
         const auto failed = builder.AllocateId();
         const auto next = builder.AllocateId();
         emit(spv::OpSelectionMerge, next, spv::SelectionControlMaskNone);
@@ -201,7 +201,15 @@ private:
         emit(spv::OpBranchConditional, won, write, done);
         emit(spv::OpLabel, write);
         store(faultWord(1), uintConstant(static_cast<std::uint32_t>(BdaAbi::FaultReason::InvalidRectangle)));
-        for (std::uint32_t i = 2; i < 8; ++i) store(faultWord(i), uintConstant(0));
+        const auto component = [&](std::uint32_t vertex, std::uint32_t index) {
+            return result(spv::OpBitcast, uintType, result(spv::OpCompositeExtract, floatType, positions[vertex], index));
+        };
+        store(faultWord(2), component(0, 0));
+        store(faultWord(3), component(0, 1));
+        store(faultWord(4), component(0, 3));
+        store(faultWord(5), component(1, 0));
+        store(faultWord(6), component(1, 1));
+        store(faultWord(7), uintConstant(0));
         emit(spv::OpAtomicStore, state, scope, uintConstant(spv::MemorySemanticsReleaseMask | spv::MemorySemanticsUniformMemoryMask), uintConstant(static_cast<std::uint32_t>(BdaAbi::FaultState::Ready)));
         emit(spv::OpBranch, done);
         emit(spv::OpLabel, done);

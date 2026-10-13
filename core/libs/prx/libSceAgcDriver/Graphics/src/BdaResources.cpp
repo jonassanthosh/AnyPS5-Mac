@@ -245,7 +245,13 @@ void BdaResources::CheckFault() const {
         return;
     }
     Require(report.state == ShaderRecompiler::BdaAbi::FaultState::Ready && report.reserved == 0, "incomplete or invalid BDA fault record");
-    Require(report.reason != ShaderRecompiler::BdaAbi::FaultReason::InvalidRectangle, "rect-list requires finite nondegenerate axis-aligned positions with equal positive W");
+    if (report.reason == ShaderRecompiler::BdaAbi::FaultReason::InvalidRectangle) {
+        const auto value = [](std::uint32_t bits) { return std::bit_cast<float>(bits); };
+        char message[256];
+        std::snprintf(message, sizeof(message), "rect-list requires finite nondegenerate axis-aligned positions with equal positive W (first vertex %g, %g, w %g; second vertex %g, %g)",
+            value(static_cast<std::uint32_t>(report.address)), value(static_cast<std::uint32_t>(report.address >> 32u)), value(report.bytes), value(report.stage), value(report.instruction));
+        Require(false, message);
+    }
     if (report.reason == ShaderRecompiler::BdaAbi::FaultReason::LoopLimit) {
         // APS5_LOOP_GUARD: the shader left a loop that ran past the guard; the dispatch result is kept.
         loopGuardTripped.store(true, std::memory_order_relaxed);
