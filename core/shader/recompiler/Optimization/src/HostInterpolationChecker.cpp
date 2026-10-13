@@ -1,5 +1,6 @@
 #include "Optimization/HostInterpolationChecker.hpp"
 #include "IntermediateRepresentation/IrBlock.hpp"
+#include "IntermediateRepresentation/IrBuilder.hpp"
 #include "IntermediateRepresentation/IrMetadata/StageIO.hpp"
 #include "Optimization/DeadCodeEliminator.hpp"
 #include "Optimization/MaskedSelectEliminator.hpp"
@@ -137,6 +138,29 @@ bool HostInterpolationChecker::Lower(IrProgram& program, const ShaderPixelInputI
         }
     }
     return true;
+}
+
+void HostInterpolationChecker::ForceLower(IrProgram& program) const {
+    IrBuilder builder(program);
+    for (const auto& block : program.Blocks()) {
+        auto& instructions = block->Instructions();
+        for (auto it = instructions.begin(); it != instructions.end();) {
+            IrValue* inst = *it;
+            if (inst->Opcode() == IrOpcode::InterpolateHostP1) {
+                inst->ReplaceUsesWith(builder.ConstantF32(0.0f).Resolve(), true);
+            } else if (isBarycentric(*inst)) {
+                inst->ReplaceUsesWith((inst->Type() == IrType::F32 ? builder.ConstantF32(0.0f) : builder.Constant(0u)).Resolve(), true);
+            } else if (inst->Opcode() == IrOpcode::InterpolateHostP2) {
+                inst->Invalidate();
+                inst->SetParent(nullptr);
+                it = instructions.erase(it);
+                continue;
+            }
+            ++it;
+        }
+    }
+    DeadCodeEliminator{}.Eliminate(program);
+    if (MaskedSelectEliminator{}.Eliminate(program).removedSelects != 0u) DeadCodeEliminator{}.Eliminate(program);
 }
 
 }

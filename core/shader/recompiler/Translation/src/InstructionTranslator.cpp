@@ -513,7 +513,7 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
     for (const auto& cfgBlock : cfg.blocks) {
         const auto typedIndex = blockIndices.at(cfgBlock.id);
         TranslationContext context(program, *blocks[typedIndex], vectorLimit);
-        context.SetPixelInput(options.inputInfo.pixel, options.fragmentShaderBarycentricEnabled);
+        context.SetPixelInput(options.inputInfo.pixel, options.fragmentShaderBarycentricEnabled, options.hostInterpolationOnly);
         context.SetFloatMode(options.floatMode);
         context.SetNativeFloat16(options.nativeFloat16);
         context.SetRelaxedFloat(options.relaxedFloat);

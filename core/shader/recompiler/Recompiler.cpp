@@ -239,10 +239,18 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     };
     simplify();
     if (stageKind == ShaderStageKind::Pixel && !translateOptions.fragmentShaderBarycentricEnabled && !HostInterpolationChecker{}.Lower(program, *inputInfo.pixel)) {
-        translateOptions.fragmentShaderBarycentricEnabled = true;
-        program = translator.Translate(decoded, cfg, translateOptions);
-        program.Metadata().barycentricEmulation = true;
-        simplify();
+        const auto& capabilities = request.target.supportedCapabilities;
+        if (std::find(capabilities.begin(), capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityGeometry)) != capabilities.end()) {
+            translateOptions.fragmentShaderBarycentricEnabled = true;
+            program = translator.Translate(decoded, cfg, translateOptions);
+            program.Metadata().barycentricEmulation = true;
+            simplify();
+        } else {
+            translateOptions.hostInterpolationOnly = true;
+            program = translator.Translate(decoded, cfg, translateOptions);
+            simplify();
+            HostInterpolationChecker{}.ForceLower(program);
+        }
     }
 
     constexpr DenormalFlushEliminator denormalFlushEliminator;
