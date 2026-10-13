@@ -41,18 +41,18 @@ public:
         vec4FloatType = type(spv::OpTypeVector, floatType, 4u);
         functionType = type(spv::OpTypeFunction, voidType);
 
-        perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType);
+        perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpMemberDecorate, {1u, spv::DecorationBuiltIn, spv::BuiltInClipDistance}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType, array(floatType, 1u));
 
         ptrInputVec4Float = pointer(spv::StorageClassInput, vec4FloatType);
         ptrOutputVec4Float = pointer(spv::StorageClassOutput, vec4FloatType);
+        ptrInputFloat = pointer(spv::StorageClassInput, floatType);
+        ptrOutputFloat = pointer(spv::StorageClassOutput, floatType);
         if (model == spv::ExecutionModelTessellationControl) {
             boolType = type(spv::OpTypeBool);
             vec2BoolType = type(spv::OpTypeVector, boolType, 2u);
             vec2FloatType = type(spv::OpTypeVector, floatType, 2u);
-            ptrOutputFloat = pointer(spv::StorageClassOutput, floatType);
         } else {
             vec3FloatType = type(spv::OpTypeVector, floatType, 3u);
-            ptrInputFloat = pointer(spv::StorageClassInput, floatType);
         }
     }
 
@@ -116,6 +116,13 @@ public:
 
         const auto position = result(spv::OpSelect, vec4FloatType, isFourth, position3, load(vec4FloatType, access(ptrInputVec4Float, glIn, index, intConstant(0))));
         store(access(ptrOutputVec4Float, glOut, invocation, intConstant(0)), position);
+        auto clip3 = constant(floatType, 0);
+        for (std::uint32_t i = 0; i < 3; i++) {
+            const auto clip = load(floatType, access(ptrInputFloat, glIn, intConstant(i), intConstant(1), intConstant(0)));
+            clip3 = result(spv::OpFAdd, floatType, clip3, result(spv::OpFMul, floatType, clip, barycentric[i]));
+        }
+        const auto clip = result(spv::OpSelect, floatType, fourth, clip3, load(floatType, access(ptrInputFloat, glIn, index, intConstant(1), intConstant(0))));
+        store(access(ptrOutputFloat, glOut, invocation, intConstant(1), intConstant(0)), clip);
 
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
             if (parameters[i].missing) {
@@ -149,6 +156,7 @@ public:
 
         const auto position = load(vec4FloatType, access(ptrInputVec4Float, glIn, index, intConstant(0)));
         store(access(ptrOutputVec4Float, glOut, intConstant(0)), position);
+        store(access(ptrOutputFloat, glOut, intConstant(1), intConstant(0)), load(floatType, access(ptrInputFloat, glIn, index, intConstant(1), intConstant(0))));
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
             store(outputs[i], load(vec4FloatType, access(ptrInputVec4Float, inputs[i], index)));
         }
@@ -279,6 +287,7 @@ private:
     void defineEntry(spv::ExecutionModel model) {
         builder.EmitCapability(spv::CapabilityShader);
         builder.EmitCapability(spv::CapabilityTessellation);
+        builder.EmitCapability(spv::CapabilityClipDistance);
         main = result(spv::OpFunction, voidType, spv::FunctionControlMaskNone, functionType);
         if (model == spv::ExecutionModelTessellationControl) {
             builder.AddExecutionMode(main, spv::ExecutionModeOutputVertices, 4u);
@@ -387,6 +396,7 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
     require(target.tessellation.has_value(), "tessellation shaders are unavailable");
     require(target.spirvVersion >= 0x00010300u && target.spirvVersion <= 0x00010500u, "unsupported SPIR-V target version");
     require(std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), spv::CapabilityTessellation) != target.supportedCapabilities.end(), "tessellation capability is unavailable");
+    require(std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), spv::CapabilityClipDistance) != target.supportedCapabilities.end(), "clip distance capability is unavailable");
     std::vector<Parameter> parameters;
     std::set<std::uint32_t> locations;
     for (const auto& input : fragment.fragmentParameters) {

@@ -42,11 +42,22 @@ bool PositionIsInvariant(std::span<const std::uint32_t> words) {
     return true;
 }
 
+bool DeclaresClipDistance(std::span<const std::uint32_t> words) {
+    for (std::size_t offset = 5; offset < words.size();) {
+        const auto count = words[offset] >> spv::WordCountShift;
+        Check(count != 0 && count <= words.size() - offset, "rect-list clip distance: malformed SPIR-V instruction");
+        const auto opcode = words[offset] & spv::OpCodeMask;
+        if (opcode == spv::OpMemberDecorate && count == 5 && words[offset + 3] == spv::DecorationBuiltIn && words[offset + 4] == spv::BuiltInClipDistance) return true;
+        offset += count;
+    }
+    return false;
+}
+
 }
 
 int main() {
     try {
-        static constexpr std::array<std::uint32_t, 2> capabilities{spv::CapabilityShader, spv::CapabilityTessellation};
+        static constexpr std::array<std::uint32_t, 3> capabilities{spv::CapabilityShader, spv::CapabilityTessellation, spv::CapabilityClipDistance};
         SpirvTarget target{};
         target.vulkanVersion = 0x00401000u;
         target.spirvVersion = 0x00010400u;
@@ -57,6 +68,16 @@ int main() {
         const auto shaders = BuildRectListShaders(vertex, fragment, target);
         Check(PositionIsInvariant(shaders.control.spirv.Words()), "rect-list control gl_Position is not Invariant");
         Check(PositionIsInvariant(shaders.evaluation.spirv.Words()), "rect-list evaluation gl_Position is not Invariant");
+        Check(DeclaresClipDistance(shaders.control.spirv.Words()), "rect-list control does not pass the vertex clip distance through");
+        Check(DeclaresClipDistance(shaders.evaluation.spirv.Words()), "rect-list evaluation does not pass the vertex clip distance through");
+        target.supportedCapabilities = std::span(capabilities).first(2);
+        bool rejected = false;
+        try {
+            static_cast<void>(BuildRectListShaders(vertex, fragment, target));
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        Check(rejected, "rect-list shaders were built without the clip distance capability");
         std::printf("rect-list position invariant tests passed\n");
         return 0;
     } catch (const std::exception& error) {

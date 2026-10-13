@@ -3476,7 +3476,7 @@ void rectListTests() {
     vertex.spirv = makeModule({});
     RecompileResult fragment;
     fragment.spirv = makeModule({.fragment = true});
-    const std::array<std::uint32_t, 2> capabilities{spv::CapabilityShader, spv::CapabilityTessellation};
+    const std::array<std::uint32_t, 3> capabilities{spv::CapabilityShader, spv::CapabilityTessellation, spv::CapabilityClipDistance};
     SpirvTarget target{};
     target.vulkanVersion = VK_API_VERSION_1_1;
     target.spirvVersion = 0x00010300u;
@@ -3497,9 +3497,9 @@ void rectListTests() {
             auto state = DecodeState(queue);
             Require(state.rectList && state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST && state.cullMode == VK_CULL_MODE_NONE, "rect-list state was not decoded");
             Require(!state.stages.tessellation && state.stages.path == ShaderPath::Vertex, "rect-list changed guest shader routing");
-            ValidateShaders(shaders, state, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false);
+            ValidateShaders(shaders, state, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false, false, false, false, false, false, true);
             state.rectList = false;
-            expectFailure([&] { ValidateShaders(shaders, state, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false); }, "stage count");
+            expectFailure([&] { ValidateShaders(shaders, state, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false, false, false, false, false, false, true); }, "stage count");
         }
     }
     vertex.spirv = makeModule({.parameterOutput = true});
@@ -3512,7 +3512,7 @@ void rectListTests() {
     parameterQueue.userConfig[0x242] = 17;
     const auto parameterState = DecodeState(parameterQueue);
     const std::array<CompiledShader, 4> parameterShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &auxiliary.control, 0}, {ShaderStage::TessellationEvaluation, &auxiliary.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
-    ValidateShaders(parameterShaders, parameterState, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false);
+    ValidateShaders(parameterShaders, parameterState, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false, false, false, false, false, false, true);
     fragment.fragmentParameters[0].perVertex = true;
     auto explicitInterpolation = BuildRectListShaders(vertex, fragment, target);
     Require(!explicitInterpolation.control.spirv.empty() && !explicitInterpolation.evaluation.spirv.empty(), "rect-list shaders for an explicitly interpolated parameter are empty");
@@ -4953,10 +4953,12 @@ int main(int argc, char** argv) {
             auto bounded = state;
             bounded.depthBoundsTest = true;
             bounded.minDepthBounds = 0.25f;
-            AgcDriver::Graphics::ValidateDepthBounds(context, bounded);
+            auto boundsContext = context;
+            boundsContext.depthBounds = true;
+            AgcDriver::Graphics::ValidateDepthBounds(boundsContext, bounded);
             bounded.minDepthBounds = 1.5f;
-            expectFailure([&] { AgcDriver::Graphics::ValidateDepthBounds(context, bounded); }, "depth bounds outside [0, 1]");
-            auto unrestricted = context;
+            expectFailure([&] { AgcDriver::Graphics::ValidateDepthBounds(boundsContext, bounded); }, "depth bounds outside [0, 1]");
+            auto unrestricted = boundsContext;
             unrestricted.depthRangeUnrestricted = true;
             AgcDriver::Graphics::ValidateDepthBounds(unrestricted, bounded);
         }
