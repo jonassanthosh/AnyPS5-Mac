@@ -9,6 +9,7 @@ namespace ShaderRecompiler {
 std::uint32_t EmitSubgroupLocalInvocationId(SpirvEmitterState& state);
 std::uint32_t EmitHostSubgroupLane(SpirvEmitterState& state, std::uint32_t lane);
 std::uint32_t EmitWaveBallot(SpirvEmitterState& state, std::uint32_t ballot);
+std::uint32_t EmitConvergentResult(SpirvEmitterState& state, std::uint32_t type, std::uint32_t value);
 std::uint32_t EmitSubgroupBallot(SpirvEmitterState& state, std::uint32_t predicate);
 std::uint32_t EmitSubgroupShuffle(SpirvEmitterState& state, std::uint32_t type, std::uint32_t value, std::uint32_t lane);
 std::uint32_t EmitSubgroupElect(SpirvEmitterState& state);

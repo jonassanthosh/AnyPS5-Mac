@@ -793,7 +793,9 @@ std::uint32_t EmitUGreaterThan64(SpirvEmitterState& state, std::uint32_t arg0, s
 }
 
 std::uint32_t EmitFPIsNan32(SpirvEmitterState& state, std::uint32_t arg0) {
-    return EmitNative<spv::OpFUnordNotEqual, IrType::U1>(state, arg0, arg0);
+    const auto bits = Unary(state, spv::OpBitcast, TypeU32(state), arg0);
+    const auto magnitude = Binary(state, spv::OpBitwiseAnd, TypeU32(state), bits, ConstantU32(state, 0x7fffffffu));
+    return Binary(state, spv::OpUGreaterThan, TypeBool(state), magnitude, ConstantU32(state, 0x7f800000u));
 }
 
 std::uint32_t EmitFPMin32(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {

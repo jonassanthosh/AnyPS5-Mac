@@ -136,13 +136,14 @@ std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();
     state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, low, scope, half == 0u ? Def(predicate) : otherHalf->Def(predicate));
+    const auto lowBallot = EmitConvergentResult(state, ballotType, low);
     const auto high = state.module.AllocateId();
     const auto lowWord = state.module.AllocateId();
     const auto highWord = state.module.AllocateId();
     const auto ballot = state.module.AllocateId();
     state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, high, scope, half == 1u ? Def(predicate) : otherHalf->Def(predicate));
-    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), lowWord, low, 0u);
-    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), highWord, high, 0u);
+    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), lowWord, lowBallot, 0u);
+    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), highWord, EmitConvergentResult(state, ballotType, high), 0u);
     state.module.AddFunction(spv::OpCompositeConstruct, ballotType, ballot, lowWord, highWord, ConstantU32(state, 0u), ConstantU32(state, 0u));
     return ballot;
 }
@@ -179,8 +180,10 @@ std::uint32_t SpirvValueEmitContext::Shuffle(const IrValue& inst, std::size_t in
     const auto value = state.module.AllocateId();
     state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope, HalfArg(inst, index, 0u), physicalLane);
     state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, high, scope, HalfArg(inst, index, 1u), physicalLane);
+    const auto lowValue = EmitConvergentResult(state, type, low);
+    const auto highValue = EmitConvergentResult(state, type, high);
     state.module.AddFunction(spv::OpINotEqual, TypeBool(state), inHigh, EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 32u)), ConstantU32(state, 0u));
-    state.module.AddFunction(spv::OpSelect, type, value, inHigh, high, low);
+    state.module.AddFunction(spv::OpSelect, type, value, inHigh, highValue, lowValue);
     return value;
 }
 
