@@ -86,7 +86,7 @@ void Handler(int signal, siginfo_t* info, void* raw) {
 void Runtime::InstallCallbackBridge() {
     struct sigaction action{};
     action.sa_sigaction = Handler;
-    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGBUS, &action, &previousBus) != 0 || sigaction(SIGSEGV, &action, &previousSegv) != 0) {
         throw std::runtime_error("Cannot install the native-to-guest callback bridge");

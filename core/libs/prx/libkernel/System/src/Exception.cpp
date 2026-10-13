@@ -447,6 +447,13 @@ void ToHost(const GuestMcontext&, mcontext_t&) {
 #endif
 
 void Deliver(int, siginfo_t*, void* context) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    sigset_t faults;
+    sigemptyset(&faults);
+    sigaddset(&faults, SIGSEGV);
+    sigaddset(&faults, SIGBUS);
+    pthread_sigmask(SIG_UNBLOCK, &faults, nullptr);
+#endif
     const auto handler = Handler(RaisedSignal);
     if (handler == nullptr) {
         static constexpr char message[] = "sceKernelRaiseException: the handler was removed before the signal was delivered\n";

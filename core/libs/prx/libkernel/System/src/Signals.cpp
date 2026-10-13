@@ -153,7 +153,15 @@ void Dispatch(int native) {
         return;
     }
     const auto callback = handlers[guest].load();
-    if (reinterpret_cast<std::uintptr_t>(callback) > 1) callback(guest);
+    if (reinterpret_cast<std::uintptr_t>(callback) <= 1) return;
+#if defined(__APPLE__) && defined(__aarch64__)
+    sigset_t faults;
+    sigemptyset(&faults);
+    sigaddset(&faults, SIGSEGV);
+    sigaddset(&faults, SIGBUS);
+    pthread_sigmask(SIG_UNBLOCK, &faults, nullptr);
+#endif
+    callback(guest);
 }
 #if defined(__APPLE__) && defined(__aarch64__)
 constexpr bool TranslatedGuest = true;
