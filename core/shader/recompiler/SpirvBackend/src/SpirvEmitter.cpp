@@ -18,6 +18,20 @@ namespace ShaderRecompiler {
 
 namespace {
 
+std::uint32_t VulkanStageForModel(std::uint32_t model) {
+    switch (model) {
+    case spv::ExecutionModelVertex: return 0x1u;
+    case spv::ExecutionModelTessellationControl: return 0x2u;
+    case spv::ExecutionModelTessellationEvaluation: return 0x4u;
+    case spv::ExecutionModelGeometry: return 0x8u;
+    case spv::ExecutionModelFragment: return 0x10u;
+    case spv::ExecutionModelGLCompute: return 0x20u;
+    case spv::ExecutionModelTaskEXT: return 0x40u;
+    case spv::ExecutionModelMeshEXT: return 0x80u;
+    default: return 0xffffffffu;
+    }
+}
+
 [[noreturn]] void FailProgram(const IrProgram& program, const char* reason) {
     throw std::runtime_error("SPIR-V emission failed: hash=0x" + std::to_string(program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(program.Resources().stage)) + " reason=" + reason);
 }
@@ -115,13 +129,13 @@ std::uint32_t SpirvValueEmitContext::HalfArg(const IrValue& inst, std::size_t in
 }
 
 std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
+    if (otherHalf == nullptr) {
+        return EmitWaveBallot(state, EmitSubgroupBallot(state, Def(predicate)));
+    }
     const auto ballotType = TypeU32Vector(state, 4u);
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();
-    state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, low, scope, otherHalf == nullptr || half == 0u ? Def(predicate) : otherHalf->Def(predicate));
-    if (otherHalf == nullptr) {
-        return EmitWaveBallot(state, low);
-    }
+    state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, low, scope, half == 0u ? Def(predicate) : otherHalf->Def(predicate));
     const auto high = state.module.AllocateId();
     const auto lowWord = state.module.AllocateId();
     const auto highWord = state.module.AllocateId();
@@ -134,7 +148,7 @@ std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
 }
 
 std::uint32_t SpirvValueEmitContext::FirstLane(std::uint32_t ballot) {
-    if (otherHalf == nullptr) {
+    if (otherHalf == nullptr && !state.singleLaneWave) {
         const auto result = state.module.AllocateId();
         state.module.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup), ballot);
         return result;
@@ -158,10 +172,7 @@ std::uint32_t SpirvValueEmitContext::Shuffle(const IrValue& inst, std::size_t in
     const auto type = TypeId(state, inst.Argument(index)->Type());
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();
-    if (otherHalf == nullptr) {
-        state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope, Arg(inst, index), EmitHostSubgroupLane(state, lane));
-        return low;
-    }
+    if (otherHalf == nullptr) return EmitSubgroupShuffle(state, type, Arg(inst, index), EmitHostSubgroupLane(state, lane));
     const auto physicalLane = EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31u));
     const auto high = state.module.AllocateId();
     const auto inHigh = state.module.AllocateId();
@@ -253,7 +264,13 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     state.registrationModules = target.registrationModules;
     state.fragmentDescriptorSet = target.fragmentDescriptorSet;
     state.hostSubgroupSize = target.subgroupSize;
-    state.splitSubgroup = program.WaveSize() == 32u && target.subgroupSize > 32u;
+    state.singleLaneWave = (target.subgroupStages & VulkanStageForModel(ExecutionModelForStage(program.Resources().stage))) == 0;
+    state.splitSubgroup = !state.singleLaneWave && program.WaveSize() == 32u && target.subgroupSize > 32u;
+    if (state.singleLaneWave) {
+        state.requirements.subgroupBallot = false;
+        state.requirements.subgroupShuffle = false;
+        state.requirements.subgroupLocalInvocationId = false;
+    }
     if (state.splitSubgroup && (state.requirements.subgroupBallot || state.requirements.subgroupShuffle)) state.requirements.subgroupLocalInvocationId = true;
     const auto* workgroup = ShaderWorkgroupInputFor(state);
     state.laneCount = workgroup != nullptr && program.WaveSize() == 64u && workgroup->hostSubgroupSize == 32u ? 2u : 1u;

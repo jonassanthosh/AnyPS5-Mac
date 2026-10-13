@@ -1180,9 +1180,7 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
         state.module.AddFunction(append ? spv::OpAtomicIAdd : spv::OpAtomicISub, TypeU32(state), value, EmitMemoryElementPointer(state, access, index), ConstantU32(state, gds ? spv::ScopeDevice : spv::ScopeWorkgroup), ConstantU32(state, spv::MemorySemanticsMaskNone), count);
         return value;
     });
-    const auto result = state.module.AllocateId();
-    state.module.AddFunction(spv::OpGroupNonUniformShuffle, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup), atomic, EmitHostSubgroupLane(state, sourceLane));
-    return result;
+    return EmitSubgroupShuffle(state, TypeU32(state), atomic, EmitHostSubgroupLane(state, sourceLane));
 }
 
 template<typename TUpdate>
@@ -1213,8 +1211,7 @@ std::uint32_t LockedLdsUpdate(SpirvEmitterState& state, std::uint32_t type, std:
     state.module.AddFunction(spv::OpSelectionMerge, pendingMerge, spv::SelectionControlMaskNone);
     state.module.AddFunction(spv::OpBranchConditional, done, pendingMerge, pending);
     EmitLabel(state, pending);
-    const auto elected = state.module.AllocateId();
-    state.module.AddFunction(spv::OpGroupNonUniformElect, TypeBool(state), elected, ConstantU32(state, spv::ScopeSubgroup));
+    const auto elected = EmitSubgroupElect(state);
     state.module.AddFunction(spv::OpSelectionMerge, servedMerge, spv::SelectionControlMaskNone);
     state.module.AddFunction(spv::OpBranchConditional, elected, attempt, servedMerge);
     EmitLabel(state, attempt);
@@ -1243,8 +1240,7 @@ std::uint32_t LockedLdsUpdate(SpirvEmitterState& state, std::uint32_t type, std:
     EmitLabel(state, pendingMerge);
     state.module.AddFunction(spv::OpPhi, TypeBool(state), doneNext, served, servedMerge, done, body);
     state.module.AddFunction(spv::OpPhi, type, resultNext, servedResult, servedMerge, result, body);
-    const auto ballot = state.module.AllocateId();
-    state.module.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4u), ballot, ConstantU32(state, spv::ScopeSubgroup), Unary(state, spv::OpLogicalNot, TypeBool(state), doneNext));
+    const auto ballot = EmitSubgroupBallot(state, Unary(state, spv::OpLogicalNot, TypeBool(state), doneNext));
     std::uint32_t remaining = ConstantU32(state, 0u);
     for (std::uint32_t component = 0; component < 4u; ++component) {
         const auto word = state.module.AllocateId();

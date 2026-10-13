@@ -15,6 +15,7 @@ namespace ShaderRecompiler
     namespace {
 
         std::uint32_t HostInvocationId(SpirvEmitterState& state) {
+            if (state.singleLaneWave) return ConstantU32(state, 0u);
             if (state.subgroupLocalInvocationIdVariable == 0) {
                 FailEmit("SubgroupLocalInvocationId was not declared before function emission");
             }
@@ -35,6 +36,35 @@ namespace ShaderRecompiler
         if (!state.splitSubgroup) return lane;
         const auto base = EmitBinaryU32(state, spv::OpBitwiseAnd, HostInvocationId(state), ConstantU32(state, ~31u));
         return EmitAddU32(state, base, lane);
+    }
+
+    std::uint32_t EmitSubgroupBallot(SpirvEmitterState& state, std::uint32_t predicate) {
+        const auto ballotType = TypeU32Vector(state, 4u);
+        const auto ballot = state.module.AllocateId();
+        if (state.singleLaneWave) {
+            const auto bit = state.module.AllocateId();
+            const auto zero = ConstantU32(state, 0u);
+            state.module.AddFunction(spv::OpSelect, TypeU32(state), bit, predicate, ConstantU32(state, 1u), zero);
+            if (state.laneHalf == 0) state.module.AddFunction(spv::OpCompositeConstruct, ballotType, ballot, bit, zero, zero, zero);
+            else state.module.AddFunction(spv::OpCompositeConstruct, ballotType, ballot, zero, bit, zero, zero);
+            return ballot;
+        }
+        state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, ballot, ConstantU32(state, spv::ScopeSubgroup), predicate);
+        return ballot;
+    }
+
+    std::uint32_t EmitSubgroupShuffle(SpirvEmitterState& state, std::uint32_t type, std::uint32_t value, std::uint32_t lane) {
+        if (state.singleLaneWave) return value;
+        const auto result = state.module.AllocateId();
+        state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, result, ConstantU32(state, spv::ScopeSubgroup), value, lane);
+        return result;
+    }
+
+    std::uint32_t EmitSubgroupElect(SpirvEmitterState& state) {
+        if (state.singleLaneWave) return ConstantBool(state, true);
+        const auto elected = state.module.AllocateId();
+        state.module.AddFunction(spv::OpGroupNonUniformElect, TypeBool(state), elected, ConstantU32(state, spv::ScopeSubgroup));
+        return elected;
     }
 
     std::uint32_t EmitWaveBallot(SpirvEmitterState& state, std::uint32_t ballot) {
@@ -183,8 +213,7 @@ namespace ShaderRecompiler
     }
 
     std::uint32_t EmitSubgroupLaneActiveBool(SpirvEmitterState& state, std::uint32_t lane) {
-        const auto activeBallot = state.module.AllocateId();
-        state.module.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4), activeBallot, ConstantU32(state, spv::ScopeSubgroup), ConstantBool(state, true));
+        const auto activeBallot = EmitSubgroupBallot(state, ConstantBool(state, true));
         return EmitBallotLaneActiveBool(state, EmitWaveBallot(state, activeBallot), lane);
     }
 }
