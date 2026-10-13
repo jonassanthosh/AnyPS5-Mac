@@ -415,8 +415,12 @@ bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, co
             const auto next = function.find(candidate.Next());
             if (next == function.end()) continue;
             const auto immediate = candidate.operands[1].imm.value.u & 0xffffffffull;
+            const auto branch = DirectTarget(next->second);
+            const bool intoTable = branch && *branch <= jump.address && jump.address - *branch <= 32;
             if (next->second.instruction.mnemonic == ZYDIS_MNEMONIC_JNBE) bound = immediate + 1;
             else if (next->second.instruction.mnemonic == ZYDIS_MNEMONIC_JNB) bound = immediate;
+            else if (next->second.instruction.mnemonic == ZYDIS_MNEMONIC_JBE && intoTable) bound = immediate + 1;
+            else if (next->second.instruction.mnemonic == ZYDIS_MNEMONIC_JB && intoTable) bound = immediate;
         }
         if (!bound || *bound < 2 || *bound > 4096) {
             return false;
