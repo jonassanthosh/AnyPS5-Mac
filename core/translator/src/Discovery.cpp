@@ -338,13 +338,52 @@ bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, co
         return false;
     }
     std::optional<std::uint64_t> count;
+    const auto stackSlot = [](const ZydisDecodedOperand& memory) {
+        const auto base = Enclosing(memory.mem.base);
+        return memory.type == ZYDIS_OPERAND_TYPE_MEMORY && memory.mem.index == ZYDIS_REGISTER_NONE &&
+            (base == ZYDIS_REGISTER_RSP || base == ZYDIS_REGISTER_RBP);
+    };
+    std::optional<ZydisDecodedOperand> slot;
+    std::map<ZydisRegister, std::uint64_t> slotBounds;
     for (std::size_t i = searchFrom; i < path.size(); ++i) {
         const auto& candidate = path[i];
+        if (slot) {
+            const auto mnemonic = candidate.instruction.mnemonic;
+            if ((mnemonic == ZYDIS_MNEMONIC_CMP || mnemonic == ZYDIS_MNEMONIC_SUB) && i > 0 &&
+                candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER && candidate.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+                const auto branch = path[i - 1].instruction.mnemonic;
+                const auto immediate = ComparedImmediate(candidate);
+                if (branch == ZYDIS_MNEMONIC_JNBE) slotBounds[Enclosing(candidate.operands[0].reg.value)] = immediate + 1;
+                else if (branch == ZYDIS_MNEMONIC_JNB) slotBounds[Enclosing(candidate.operands[0].reg.value)] = immediate;
+                continue;
+            }
+            if (mnemonic == ZYDIS_MNEMONIC_MOV && stackSlot(candidate.operands[0]) && candidate.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                Enclosing(candidate.operands[0].mem.base) == Enclosing(slot->mem.base) && candidate.operands[0].mem.disp.value == slot->mem.disp.value) {
+                const auto stored = Enclosing(candidate.operands[1].reg.value);
+                if (const auto bound = slotBounds.find(stored); bound != slotBounds.end()) {
+                    count = bound->second;
+                    break;
+                }
+                indexRegister = stored;
+                slot.reset();
+            }
+            continue;
+        }
+        if ((candidate.instruction.mnemonic == ZYDIS_MNEMONIC_MOV || candidate.instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX) &&
+            candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER && Enclosing(candidate.operands[0].reg.value) == indexRegister &&
+            stackSlot(candidate.operands[1])) {
+            slot = candidate.operands[1];
+            continue;
+        }
         if ((candidate.instruction.mnemonic == ZYDIS_MNEMONIC_MOV || candidate.instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX) &&
             candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
             candidate.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
             Enclosing(candidate.operands[0].reg.value) == indexRegister) {
             indexRegister = Enclosing(candidate.operands[1].reg.value);
+            if (const auto bound = slotBounds.find(indexRegister); bound != slotBounds.end()) {
+                count = bound->second;
+                break;
+            }
             continue;
         }
         if (candidate.instruction.mnemonic == ZYDIS_MNEMONIC_CMP &&
