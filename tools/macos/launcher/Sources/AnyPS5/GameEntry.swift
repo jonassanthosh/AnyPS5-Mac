@@ -17,16 +17,20 @@ final class GameEntry: ObservableObject, Identifiable {
     @Published private(set) var info: GameInfo
     @Published private(set) var state: GameState = .unprepared
     @Published private(set) var output: [String] = []
+    @Published private(set) var outdated = false
+    @Published private(set) var settings = GameSettings()
     private weak var library: Library?
     private var builder: Process?
     private var game: Process?
     private var stopping = false
     private var pending = ""
+    private var playAfterPrepare = false
 
     init(info: GameInfo, library: Library) {
         self.id = info.root.path
         self.info = info
         self.library = library
+        self.settings = GameSettings.load(settingsURL)
         refresh()
     }
 
@@ -40,6 +44,38 @@ final class GameEntry: ObservableObject, Identifiable {
     var folder: URL { Paths.titles.appendingPathComponent(info.titleID) }
     var runLog: URL { folder.appendingPathComponent("last-run.log") }
     var buildLog: URL { folder.appendingPathComponent("last-build.log") }
+    var settingsURL: URL { folder.appendingPathComponent("settings.json") }
+
+    func save(_ newSettings: GameSettings) {
+        do {
+            try newSettings.save(settingsURL)
+            settings = newSettings
+            checkCurrent()
+        } catch {
+            library?.problem = "The settings could not be saved: \(error.localizedDescription)"
+        }
+    }
+
+    func checkCurrent() {
+        guard state == .ready, let repository = library?.repository else { outdated = false; return }
+        let arguments = [repository.appendingPathComponent("tools/macos/title.py").path, "status", info.root.path]
+        let environment = environment()
+        Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = arguments
+            process.environment = environment
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let current = fields?["current"] as? Bool ?? true
+            await MainActor.run { self.outdated = !current }
+        }
+    }
 
     var prepared: Bool {
         let record = folder.appendingPathComponent("title.json")
@@ -83,6 +119,7 @@ final class GameEntry: ObservableObject, Identifiable {
         } else {
             state = prepared ? .ready : .unprepared
         }
+        checkCurrent()
     }
 
     func prepare(force: Bool = false) {
@@ -130,7 +167,13 @@ final class GameEntry: ObservableObject, Identifiable {
     }
 
     func play() {
-        guard !busy, let script = script() else { return }
+        guard !busy else { return }
+        if outdated {
+            playAfterPrepare = true
+            prepare()
+            return
+        }
+        guard let script = script() else { return }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: runLog.path, contents: nil)
         let process = Process()
@@ -160,6 +203,37 @@ final class GameEntry: ObservableObject, Identifiable {
         guard let game, game.isRunning else { return }
         stopping = true
         game.terminate()
+    }
+
+    @Published private(set) var capturing = false
+
+    func captureHangReport() {
+        guard let game, game.isRunning, !capturing else { return }
+        capturing = true
+        let pid = game.processIdentifier
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let report = folder.appendingPathComponent("hang-\(formatter.string(from: Date())).txt")
+        let log = runLog
+        Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+            process.arguments = [String(pid), "5", "-file", report.path]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
+            if let tail = try? String(contentsOf: log, encoding: .utf8).split(separator: "\n").suffix(200).joined(separator: "\n"),
+               let handle = try? FileHandle(forWritingTo: report) {
+                handle.seekToEndOfFile()
+                handle.write(Data(("\n\nLast 200 lines of the game log:\n" + tail + "\n").utf8))
+                try? handle.close()
+            }
+            await MainActor.run {
+                self.capturing = false
+                NSWorkspace.shared.activateFileViewerSelecting([report])
+            }
+        }
     }
 
     func revealBuild() {
@@ -204,6 +278,8 @@ final class GameEntry: ObservableObject, Identifiable {
 
     private func prepared(status: Int32, reason: Process.TerminationReason) {
         builder = nil
+        let playing = playAfterPrepare
+        playAfterPrepare = false
         if stopping {
             stopping = false
             settle()
@@ -211,6 +287,8 @@ final class GameEntry: ObservableObject, Identifiable {
         }
         if status == 0 && reason == .exit && prepared {
             state = .ready
+            outdated = false
+            if playing { play() }
             return
         }
         let error = output.last { $0.hasPrefix("error ") }.map { String($0.dropFirst(6)) }

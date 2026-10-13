@@ -135,7 +135,13 @@ tools/macos/title.py build <game folder>
 tools/macos/title.py run <game folder>
 ```
 
-Both keep their files in `~/Library/Application Support/AnyPS5/Titles/<title id>`: the linked `title` executable, the translated sources and objects in `build`, and in `run` the guest's working directory with its `app0` link to the game, save data and shader caches. `build` prints `progress <phase> <done> <total>` lines for the app and rebuilds only what changed; `--force` translates again even when nothing did.
+### Settings
+
+[`tools/macos/options.json`](../../tools/macos/options.json) lists every setting the app shows: display (frame pacing, frames in flight, fullscreen, scaling), graphics accuracy, MoltenVK performance switches, caches and build options (optimization, CPU tuning, memory ordering, flag computation, compiler jobs). Each choice names the environment variables it sets when the game runs, or the compiler and translator flags it adds when the game is prepared. Game defaults live in `~/Library/Application Support/AnyPS5/settings.json` and a game's own choices in its `settings.json`; both can add free-form `NAME=value` lines under `environment`. `title.py settings <game folder>` prints what a game ends up with, and `title.py status <game folder>` says whether its build matches its build settings and the translator.
+
+While a game runs, Capture Hang Report in the app samples every thread with `sample` and saves the stacks with the end of the game log, which shows where a stuck game waits.
+
+Both commands keep their files in `~/Library/Application Support/AnyPS5/Titles/<title id>`: the linked `title` executable, the translated sources and objects in `build`, and in `run` the guest's working directory with its `app0` link to the game, save data and shader caches. `build` prints `progress <phase> <done> <total>` lines for the app and rebuilds only what changed; `--force` translates again even when nothing did.
 
 ## Not covered
 

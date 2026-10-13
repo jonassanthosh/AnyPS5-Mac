@@ -1,0 +1,250 @@
+{
+  "groups": [
+    {
+      "id": "display",
+      "title": "Display",
+      "options": [
+        {
+          "id": "presentMode",
+          "title": "Frame pacing",
+          "help": "How finished frames reach the screen. V-Sync is smooth and never tears; the uncapped modes lower latency and can raise the frame rate.",
+          "default": "fifo",
+          "choices": [
+            {"value": "fifo", "title": "V-Sync", "run": {"ANYPS5_PRESENT_MODE": "fifo"}},
+            {"value": "fifo_latest_ready", "title": "V-Sync, low latency", "run": {"ANYPS5_PRESENT_MODE": "fifo_latest_ready"}},
+            {"value": "mailbox", "title": "Uncapped, no tearing", "run": {"ANYPS5_PRESENT_MODE": "mailbox"}},
+            {"value": "immediate", "title": "Uncapped, may tear", "run": {"ANYPS5_PRESENT_MODE": "immediate"}}
+          ]
+        },
+        {
+          "id": "framesInFlight",
+          "title": "Frames in flight",
+          "help": "How many frames the GPU may queue ahead of the game. More can raise the frame rate at the cost of input latency.",
+          "default": "1",
+          "choices": [
+            {"value": "0", "title": "None (wait every frame)", "run": {"APS5_SYNC_FLIP": "1"}},
+            {"value": "1", "title": "1", "run": {}},
+            {"value": "2", "title": "2", "run": {"APS5_FLIP_INFLIGHT": "2"}}
+          ]
+        },
+        {
+          "id": "fullscreen",
+          "title": "Start in fullscreen",
+          "help": "Open the game fullscreen. The fullscreen key toggles it while playing.",
+          "default": "off",
+          "choices": [
+            {"value": "off", "title": "Off", "run": {}},
+            {"value": "on", "title": "On", "run": {"ANYPS5_FULLSCREEN": "1"}}
+          ]
+        },
+        {
+          "id": "scaling",
+          "title": "Window scaling",
+          "help": "How the game image is stretched to the window. Sharp keeps pixel edges crisp.",
+          "default": "smooth",
+          "choices": [
+            {"value": "smooth", "title": "Smooth", "run": {}},
+            {"value": "sharp", "title": "Sharp", "run": {"MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST": "1"}}
+          ]
+        },
+        {
+          "id": "presentOccluded",
+          "title": "Draw while hidden",
+          "help": "Keep drawing frames while the game window is covered or minimized.",
+          "default": "off",
+          "choices": [
+            {"value": "off", "title": "Off", "run": {}},
+            {"value": "on", "title": "On", "run": {"APS5_PRESENT_OCCLUDED": "1"}}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "graphics",
+      "title": "Graphics",
+      "options": [
+        {
+          "id": "shaderMath",
+          "title": "Shader math",
+          "help": "Fast relaxes floating-point rules in shaders, which Metal runs faster. Exact matches the PS5 bit for bit and fixes some rendering errors.",
+          "default": "auto",
+          "choices": [
+            {"value": "auto", "title": "Automatic", "run": {}},
+            {"value": "fast", "title": "Fast", "run": {"APS5_RELAXED_FLOAT": "1"}},
+            {"value": "exact", "title": "Exact", "run": {"APS5_EXACT_FLOAT": "1"}}
+          ]
+        },
+        {
+          "id": "metalFastMath",
+          "title": "Metal fast math",
+          "help": "Lets the Metal compiler reorder floating-point operations.",
+          "default": "default",
+          "choices": [
+            {"value": "default", "title": "Default", "run": {}},
+            {"value": "always", "title": "Always", "run": {"MVK_CONFIG_FAST_MATH_ENABLED": "1"}},
+            {"value": "never", "title": "Never", "run": {"MVK_CONFIG_FAST_MATH_ENABLED": "0"}}
+          ]
+        },
+        {
+          "id": "gpuWriteBack",
+          "title": "GPU results",
+          "help": "When the GPU's results are copied back to game memory. Immediately is slower but can fix flickering, missing effects or crashes when memory is reused.",
+          "default": "deferred",
+          "choices": [
+            {"value": "deferred", "title": "When needed", "run": {}},
+            {"value": "eager", "title": "Immediately", "run": {"APS5_EAGER_WRITEBACK": "1"}}
+          ]
+        },
+        {
+          "id": "multisampleAccess",
+          "title": "Multisampled targets",
+          "help": "Some games read multisampled render targets directly, which is not supported yet. Continue keeps playing with possible rendering errors; Stop ends the game with an error.",
+          "default": "continue",
+          "choices": [
+            {"value": "continue", "title": "Continue", "run": {"APS5_ALLOW_MSAA_GUEST_ACCESS": "1"}},
+            {"value": "stop", "title": "Stop", "run": {}}
+          ]
+        },
+        {
+          "id": "argumentBuffers",
+          "title": "Metal argument buffers",
+          "help": "Binds shader resources through Metal argument buffers, which allows many more of them.",
+          "default": "on",
+          "choices": [
+            {"value": "on", "title": "On", "run": {}},
+            {"value": "off", "title": "Off", "run": {"MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS": "0"}}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "performance",
+      "title": "Performance",
+      "options": [
+        {
+          "id": "queueSubmits",
+          "title": "GPU submission",
+          "help": "Whether submitting GPU work waits for Metal to accept it. Asynchronous can smooth out frame times.",
+          "default": "default",
+          "choices": [
+            {"value": "default", "title": "Default", "run": {}},
+            {"value": "synchronous", "title": "Synchronous", "run": {"MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS": "1"}},
+            {"value": "asynchronous", "title": "Asynchronous", "run": {"MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS": "0"}}
+          ]
+        },
+        {
+          "id": "commandEncoding",
+          "title": "Command encoding",
+          "help": "When GPU commands are encoded for Metal. Immediate spreads the work across the frame instead of at submission.",
+          "default": "default",
+          "choices": [
+            {"value": "default", "title": "Default", "run": {}},
+            {"value": "deferred", "title": "At submission", "run": {"MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS": "0"}},
+            {"value": "immediate", "title": "Immediate", "run": {"MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS": "2"}}
+          ]
+        },
+        {
+          "id": "metalHeaps",
+          "title": "Metal heaps",
+          "help": "Allocates GPU memory from Metal heaps, which can lower allocation cost.",
+          "default": "default",
+          "choices": [
+            {"value": "default", "title": "Default", "run": {}},
+            {"value": "on", "title": "On", "run": {"MVK_CONFIG_USE_MTLHEAP": "1"}},
+            {"value": "off", "title": "Off", "run": {"MVK_CONFIG_USE_MTLHEAP": "0"}}
+          ]
+        },
+        {
+          "id": "shaderCompilation",
+          "title": "Shader compilation",
+          "help": "Compile Metal shaders on every core at once, which shortens stutters when new effects appear.",
+          "default": "default",
+          "choices": [
+            {"value": "default", "title": "Default", "run": {}},
+            {"value": "parallel", "title": "All cores", "run": {"MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION": "1"}}
+          ]
+        },
+        {
+          "id": "shaderCache",
+          "title": "Shader cache",
+          "help": "Keep translated shaders on disk so later sessions start faster. Turn it off to test a shader change.",
+          "default": "on",
+          "choices": [
+            {"value": "on", "title": "On", "run": {}},
+            {"value": "off", "title": "Off", "run": {"ANYPS5_NO_SHADER_CACHE": "1"}}
+          ]
+        },
+        {
+          "id": "pipelineCache",
+          "title": "Pipeline cache",
+          "help": "Keep compiled GPU pipelines on disk so later sessions stutter less.",
+          "default": "on",
+          "choices": [
+            {"value": "on", "title": "On", "run": {}},
+            {"value": "off", "title": "Off", "run": {"APS5_NO_PIPELINE_CACHE": "1"}}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "build",
+      "title": "Build",
+      "note": "Changing these makes the game prepare again the next time.",
+      "options": [
+        {
+          "id": "optimization",
+          "title": "Optimization",
+          "help": "How hard the compiler optimizes the translated game. Faster preparing gives slower code.",
+          "default": "O2",
+          "choices": [
+            {"value": "O1", "title": "Faster preparing (-O1)", "build": {"cflags": ["-O1"]}},
+            {"value": "O2", "title": "Balanced (-O2)", "build": {"cflags": ["-O2"]}},
+            {"value": "O3", "title": "Fastest code (-O3)", "build": {"cflags": ["-O3"]}}
+          ]
+        },
+        {
+          "id": "cpuTuning",
+          "title": "CPU tuning",
+          "help": "This Mac tunes the code for this Mac's processor. The result may not run on older Macs.",
+          "default": "generic",
+          "choices": [
+            {"value": "generic", "title": "Any Apple silicon Mac", "build": {"cflags": []}},
+            {"value": "native", "title": "This Mac", "build": {"cflags": ["-mcpu=native"]}}
+          ]
+        },
+        {
+          "id": "memoryOrdering",
+          "title": "Memory ordering",
+          "help": "PS5 code expects x86 memory ordering between threads. Relaxing it is faster but can cause hangs, crashes or corruption in multithreaded code.",
+          "default": "strict",
+          "choices": [
+            {"value": "strict", "title": "Strict (x86)", "build": {"cflags": ["-DAPS5_TRANSLATOR_TSO=1", "-DAPS5_TRANSLATOR_VECTOR_TSO=1"]}},
+            {"value": "scalar", "title": "Relax vector accesses", "build": {"cflags": ["-DAPS5_TRANSLATOR_TSO=1", "-DAPS5_TRANSLATOR_VECTOR_TSO=0"]}},
+            {"value": "relaxed", "title": "Relaxed (unsafe)", "build": {"cflags": ["-DAPS5_TRANSLATOR_TSO=0", "-DAPS5_TRANSLATOR_VECTOR_TSO=0"]}}
+          ]
+        },
+        {
+          "id": "flags",
+          "title": "CPU flags",
+          "help": "Conservative computes every flag an instruction writes instead of only the ones a later instruction reads. Slower, but can fix games that misbehave after preparing.",
+          "default": "minimal",
+          "choices": [
+            {"value": "minimal", "title": "Only what is read", "build": {"translate": []}},
+            {"value": "conservative", "title": "Conservative", "build": {"translate": ["--conservative-flags"]}}
+          ]
+        },
+        {
+          "id": "compileJobs",
+          "title": "Compiler jobs",
+          "help": "How many compilers run at once while preparing. Fewer keeps the Mac responsive.",
+          "default": "all",
+          "choices": [
+            {"value": "all", "title": "All cores", "build": {"jobs": 0}},
+            {"value": "half", "title": "Half the cores", "build": {"jobs": -2}},
+            {"value": "two", "title": "2", "build": {"jobs": 2}}
+          ]
+        }
+      ]
+    }
+  ]
+}

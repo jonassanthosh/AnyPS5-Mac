@@ -6,6 +6,7 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "Decoder/Png.hpp"
 #include "SDL_vulkan.h"
+#include <cstdlib>
 #include <cstdio>
 #include <span>
 #include <stdexcept>
@@ -73,7 +74,8 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
         require(false, "no Vulkan loader found; install MoltenVK and the Vulkan loader");
     }
 #endif
-    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    const Uint32 fullscreen = std::getenv("ANYPS5_FULLSCREEN") != nullptr ? static_cast<Uint32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u;
+    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | fullscreen);
     AgcDriverUnlockVulkanLoader_nid_postfix();
     require(window != nullptr, SDL_GetError());
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));

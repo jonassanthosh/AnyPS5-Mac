@@ -111,3 +111,4 @@ cookies.txt
 .env.local
 
 tools/macos/launcher/.build/
+!tools/macos/options.json

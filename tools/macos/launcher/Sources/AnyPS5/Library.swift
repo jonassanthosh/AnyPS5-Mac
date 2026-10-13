@@ -5,6 +5,7 @@ enum Paths {
     static let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("AnyPS5")
     static let titles = support.appendingPathComponent("Titles")
     static let games = support.appendingPathComponent("games.json")
+    static let settings = support.appendingPathComponent("settings.json")
     static let searchPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
     static func defaultRepository() -> URL? {
@@ -33,8 +34,13 @@ final class Library: ObservableObject {
     @Published private(set) var scanning = false
     private var hidden = Set(UserDefaults.standard.stringArray(forKey: "hidden") ?? [])
     @Published var repository: URL? {
-        didSet { UserDefaults.standard.set(repository?.path, forKey: "repository") }
+        didSet {
+            UserDefaults.standard.set(repository?.path, forKey: "repository")
+            catalog = OptionCatalog.load(repository: repository)
+        }
     }
+    @Published private(set) var catalog = OptionCatalog(groups: [])
+    @Published private(set) var defaults = GameSettings.load(Paths.settings)
 
     init() {
         if let saved = UserDefaults.standard.string(forKey: "repository"), Paths.isRepository(URL(fileURLWithPath: saved)) {
@@ -42,9 +48,20 @@ final class Library: ObservableObject {
         } else {
             repository = Paths.defaultRepository()
         }
+        catalog = OptionCatalog.load(repository: repository)
         folders = (UserDefaults.standard.stringArray(forKey: "folders") ?? []).map { URL(fileURLWithPath: $0) }
         load()
         rescan()
+    }
+
+    func saveDefaults(_ settings: GameSettings) {
+        do {
+            try settings.save(Paths.settings)
+            defaults = settings
+            games.forEach { $0.checkCurrent() }
+        } catch {
+            problem = "The settings could not be saved: \(error.localizedDescription)"
+        }
     }
 
     var selected: GameEntry? {

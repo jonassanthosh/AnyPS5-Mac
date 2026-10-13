@@ -15,12 +15,61 @@ LIBRARY = Path.home() / "Library" / "Application Support" / "AnyPS5" / "Titles"
 MODULE_SUFFIXES = (".prx", ".sprx")
 SHARD_BYTES = 400000
 EBOOT_SHARDS = 256
-COMPILE_FLAGS = ["-std=c++20", "-O2", "-DAPS5_TRANSLATOR_TSO=1", "-DAPS5_TRANSLATOR_VECTOR_TSO=1", "-w"]
-RUN_ENVIRONMENT = {"APS5_ALLOW_MSAA_GUEST_ACCESS": "1"}
+LEGACY_COMPILE_FLAGS = ["-std=c++20", "-O2", "-DAPS5_TRANSLATOR_TSO=1", "-DAPS5_TRANSLATOR_VECTOR_TSO=1", "-w"]
+OPTIONS = Path(__file__).resolve().parent / "options.json"
 
 
 class TitleError(Exception):
     pass
+
+
+def options():
+    groups = json.loads(OPTIONS.read_text(encoding="utf-8"))["groups"]
+    return [option for group in groups for option in group["options"]]
+
+
+def read_settings(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"options": {}, "environment": ""}
+    except json.JSONDecodeError as error:
+        raise TitleError(f"{path} is not valid JSON: {error}")
+    return {"options": data.get("options", {}), "environment": data.get("environment", "")}
+
+
+def effective_settings(library, title_id):
+    layers = [read_settings(Path(library).expanduser().parent / "settings.json"), read_settings(title_folder(library, title_id) / "settings.json")]
+    chosen = {}
+    run = {}
+    cflags = []
+    translate_flags = []
+    jobs = 0
+    for option in options():
+        value = option["default"]
+        for layer in layers:
+            value = layer["options"].get(option["id"], value)
+        choice = next((choice for choice in option["choices"] if choice["value"] == value), None)
+        if choice is None:
+            raise TitleError(f"setting {option['id']} has no choice {value!r}")
+        chosen[option["id"]] = value
+        run.update(choice.get("run", {}))
+        build = choice.get("build", {})
+        cflags += build.get("cflags", [])
+        translate_flags += build.get("translate", [])
+        jobs = build.get("jobs", jobs)
+    for layer in layers:
+        for line in layer["environment"].splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name, separator, value = line.partition("=")
+            if not separator or not name.strip():
+                raise TitleError(f"extra environment line {line!r} is not NAME=value")
+            run[name.strip()] = value.strip()
+    count = os.cpu_count() or 4
+    jobs = count if jobs == 0 else max(1, count // -jobs) if jobs < 0 else jobs
+    return {"options": chosen, "run": run, "cflags": cflags, "translate": translate_flags, "jobs": jobs}
 
 
 def progress(phase, done, total):
@@ -99,7 +148,7 @@ def build_tools(repo):
         note("configuring the translator")
         run_checked(["cmake", "-S", str(repo / "core" / "translator"), "-B", str(translator), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"], "configuring the translator")
     note("building the translator")
-    run_checked(["ninja", "-C", str(translator), "x64a64", "translator_title_main", "translator_runtime", "translator_elf"], "building the translator")
+    run_checked(["ninja", "-C", str(translator), *TRANSLATOR_TARGETS], "building the translator")
     if not (repo / "build-arm64" / "build.ninja").exists():
         raise TitleError(f"{repo / 'build-arm64'} is not configured; see docs/dev/ArmTranslator.md")
     note("building the system libraries")
@@ -107,12 +156,12 @@ def build_tools(repo):
     return translator
 
 
-def translate(translator, images, staging):
+def translate(translator, images, staging, flags):
     staging.mkdir(parents=True)
     for index, (path, prefix, shards) in enumerate(images):
         progress("translate", index, len(images))
         note(f"translating {path.name}")
-        command = [str(translator / "x64a64"), str(path), "-o", str(staging / (prefix or "eboot")), "--shards", str(shards), "--image-name", path.name, "--report"]
+        command = [str(translator / "x64a64"), str(path), "-o", str(staging / (prefix or "eboot")), "--shards", str(shards), "--image-name", path.name, "--report", *flags]
         if prefix:
             command += ["--symbol-prefix", prefix]
         report = run_checked(command, f"translating {path.name}")
@@ -136,7 +185,7 @@ def update_sources(staging, sources):
     sources.mkdir(parents=True, exist_ok=True)
     wanted = {path.name for path in staging.iterdir()}
     for stale in sources.iterdir():
-        if stale.suffix != ".o" and stale.name not in wanted:
+        if stale.suffix != ".o" and stale.name != "flags.json" and stale.name not in wanted:
             stale.unlink()
             stale.with_name(stale.name + ".o").unlink(missing_ok=True)
     for path in staging.iterdir():
@@ -148,8 +197,15 @@ def update_sources(staging, sources):
     shutil.rmtree(staging)
 
 
-def compile_sources(repo, sources, jobs):
+def compile_sources(repo, sources, jobs, cflags):
     include = str(repo / "core" / "translator" / "runtime" / "include")
+    stamp = sources / "flags.json"
+    flags = ["-std=c++20", *cflags, "-w"]
+    previous = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else LEGACY_COMPILE_FLAGS
+    if previous != flags:
+        for stale in sources.glob("*.o"):
+            stale.unlink()
+    stamp.write_text(json.dumps(flags), encoding="utf-8")
     pending = sorted(path for path in sources.glob("*.cpp") if not path.with_name(path.name + ".o").exists())
     total = len(pending)
     note(f"compiling {total} of {len(list(sources.glob('*.cpp')))} sources")
@@ -158,7 +214,7 @@ def compile_sources(repo, sources, jobs):
     def compile_one(path):
         output = path.with_name(path.name + ".o")
         partial = path.with_name(path.name + ".o.partial")
-        result = subprocess.run(["clang++", *COMPILE_FLAGS, "-I", include, "-c", str(path), "-o", str(partial)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        result = subprocess.run(["clang++", *flags, "-I", include, "-c", str(path), "-o", str(partial)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         if result.returncode != 0:
             partial.unlink(missing_ok=True)
             return path.name, result.stdout
@@ -199,22 +255,53 @@ def title_folder(library, title_id):
     return Path(library).expanduser() / title_id
 
 
+TRANSLATOR_TARGETS = ["x64a64", "translator_title_main", "translator_runtime", "translator_elf"]
+
+
+def plan(repo, game, library):
+    root = game_root(game)
+    info = parameters(root)
+    folder = executable_folder(root)
+    target = title_folder(library, info["titleId"])
+    settings = effective_settings(library, info["titleId"])
+    translator = repo / "build-translator"
+    modules = guest_modules(folder, system_libraries(repo))
+    images = [(folder / "eboot.bin", "", EBOOT_SHARDS)]
+    images += [(path, f"M{index}", path.stat().st_size // SHARD_BYTES + 2) for index, path in enumerate(modules, 1)]
+    return {"root": root, "info": info, "folder": folder, "target": target, "settings": settings, "translator": translator, "images": images}
+
+
+def stamp_of(work):
+    translator = work["translator"]
+    inputs = [path for path, _, _ in work["images"]] + [translator / "x64a64", translator / "libtranslator_title_main.a", translator / "libtranslator_runtime.a", translator / "libtranslator_elf.a"]
+    if not all(path.exists() for path in inputs):
+        return None
+    return fingerprint(inputs) + ":" + hashlib.sha256(json.dumps([work["settings"]["cflags"], work["settings"]["translate"]]).encode()).hexdigest()
+
+
+def status(arguments):
+    repo = Path(arguments.repo).resolve()
+    work = plan(repo, arguments.game, arguments.library)
+    record = work["target"] / "title.json"
+    prepared = (work["target"] / "title").exists() and record.exists()
+    current = prepared and json.loads(record.read_text(encoding="utf-8")).get("stamp") == stamp_of(work)
+    if current and (work["translator"] / "build.ninja").exists():
+        pending = subprocess.run(["ninja", "-C", str(work["translator"]), "-n", *TRANSLATOR_TARGETS], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+        current = not any(line.startswith("[") for line in pending.splitlines())
+    print(json.dumps({"titleId": work["info"]["titleId"], "prepared": prepared, "current": current}))
+
+
 def build(arguments):
     if arguments.own_group:
         os.setpgrp()
     repo = Path(arguments.repo).resolve()
-    root = game_root(arguments.game)
-    info = parameters(root)
-    folder = executable_folder(root)
-    target = title_folder(arguments.library, info["titleId"])
+    work = plan(repo, arguments.game, arguments.library)
+    root, info, folder, target, settings, images = work["root"], work["info"], work["folder"], work["target"], work["settings"], work["images"]
     target.mkdir(parents=True, exist_ok=True)
     note(f"{info['name']} ({info['titleId']})")
+    jobs = arguments.jobs or settings["jobs"]
     translator = build_tools(repo)
-    modules = guest_modules(folder, system_libraries(repo))
-    images = [(folder / "eboot.bin", "", EBOOT_SHARDS)]
-    images += [(path, f"M{index}", path.stat().st_size // SHARD_BYTES + 2) for index, path in enumerate(modules, 1)]
-    inputs = [path for path, _, _ in images] + [translator / "x64a64", translator / "libtranslator_title_main.a", translator / "libtranslator_runtime.a", translator / "libtranslator_elf.a"]
-    stamp = fingerprint(inputs)
+    stamp = stamp_of(work)
     binary = target / "title"
     record = target / "title.json"
     if binary.exists() and record.exists() and json.loads(record.read_text(encoding="utf-8")).get("stamp") == stamp and not arguments.force:
@@ -225,10 +312,10 @@ def build(arguments):
     work = target / "build"
     staging = work / "staging"
     shutil.rmtree(staging, ignore_errors=True)
-    translate(translator, images, staging)
+    translate(translator, images, staging, settings["translate"])
     (staging / "manifest.cpp").write_text(manifest(images), encoding="utf-8")
     update_sources(staging, work / "sources")
-    compile_sources(repo, work / "sources", arguments.jobs)
+    compile_sources(repo, work / "sources", jobs, settings["cflags"])
     link(translator, work / "sources", binary)
     record.write_text(json.dumps({**info, "game": str(root), "executableFolder": str(folder), "repo": str(repo), "stamp": stamp}, indent=2), encoding="utf-8")
     progress("done", 1, 1)
@@ -251,9 +338,15 @@ def run(arguments):
         app0.unlink()
     if not app0.exists():
         app0.symlink_to(root, target_is_directory=True)
-    environment = {**os.environ, **RUN_ENVIRONMENT}
+    environment = {**os.environ, **effective_settings(arguments.library, info["titleId"])["run"]}
     os.chdir(workspace)
     os.execve(binary, [str(binary), str(folder), str(system_libraries(repo))], environment)
+
+
+def show_settings(arguments):
+    info = parameters(game_root(arguments.game))
+    settings = effective_settings(arguments.library, info["titleId"])
+    print(json.dumps(settings, indent=2))
 
 
 def main():
@@ -263,14 +356,18 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     build_command = commands.add_parser("build")
     build_command.add_argument("game")
-    build_command.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+    build_command.add_argument("--jobs", type=int)
     build_command.add_argument("--force", action="store_true")
     build_command.add_argument("--own-group", action="store_true")
     run_command = commands.add_parser("run")
     run_command.add_argument("game")
+    settings_command = commands.add_parser("settings")
+    settings_command.add_argument("game")
+    status_command = commands.add_parser("status")
+    status_command.add_argument("game")
     arguments = parser.parse_args()
     try:
-        {"build": build, "run": run}[arguments.command](arguments)
+        {"build": build, "run": run, "settings": show_settings, "status": status}[arguments.command](arguments)
     except TitleError as error:
         print(f"error {error}", file=sys.stderr, flush=True)
         return 1

@@ -158,6 +158,7 @@ struct GameDetail: View {
     @EnvironmentObject private var library: Library
     @ObservedObject var entry: GameEntry
     @State private var confirmingRemoval = false
+    @State private var editingSettings = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -173,7 +174,16 @@ struct GameDetail: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .toolbar {
             ToolbarItem {
+                Button {
+                    editingSettings = true
+                } label: {
+                    Label("Game Settings", systemImage: "slider.horizontal.3")
+                }
+                .help("Graphics, performance and build settings for this game")
+            }
+            ToolbarItem {
                 Menu {
+                    Button("Game Settings…") { editingSettings = true }
                     Button("Prepare Again") { entry.prepare(force: true) }.disabled(!entry.canPrepare)
                     Button("Open Build Log") { entry.openLog(entry.buildLog) }
                     Button("Open Game Log") { entry.openLog(entry.runLog) }
@@ -185,6 +195,9 @@ struct GameDetail: View {
                     Label("More", systemImage: "ellipsis.circle")
                 }
             }
+        }
+        .sheet(isPresented: $editingSettings) {
+            GameSettingsSheet(entry: entry).environmentObject(library)
         }
         .confirmationDialog("Remove \(entry.info.name)?", isPresented: $confirmingRemoval) {
             Button("Remove and Delete Build Files and Saves", role: .destructive) { library.remove(entry, deletingBuild: true) }
@@ -237,14 +250,22 @@ struct GameDetail: View {
             }
             .frame(maxWidth: 520, alignment: .leading)
         case .ready:
-            Button {
-                entry.play()
-            } label: {
-                Label("Play", systemImage: "play.fill").font(.title3).frame(minWidth: 140)
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    entry.play()
+                } label: {
+                    Label("Play", systemImage: "play.fill").font(.title3).frame(minWidth: 140)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                if entry.outdated {
+                    Text("Build settings or AnyPS5 changed since this game was prepared. Play prepares it again first; unchanged code is not recompiled.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 520, alignment: .leading)
+                }
             }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.defaultAction)
         case .running(let started):
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 16) {
@@ -255,6 +276,13 @@ struct GameDetail: View {
                     Button("Stop", role: .destructive) { entry.stop() }
                 }
                 Text("The game runs in its own window. Closing that window also ends the game.").font(.callout).foregroundStyle(.secondary)
+                Button {
+                    entry.captureHangReport()
+                } label: {
+                    Label(entry.capturing ? "Capturing…" : "Capture Hang Report", systemImage: "stethoscope")
+                }
+                .disabled(entry.capturing)
+                .help("If the game is stuck, records what every thread is doing so the problem can be found")
             }
         case .failed(let message):
             Notice(symbol: "exclamationmark.triangle.fill", title: "Something went wrong", text: message, tint: .orange)
@@ -317,6 +345,16 @@ enum Elapsed {
 }
 
 struct SettingsView: View {
+    var body: some View {
+        TabView {
+            GeneralSettingsView().tabItem { Label("General", systemImage: "gearshape") }
+            GameDefaultsView().tabItem { Label("Game Defaults", systemImage: "slider.horizontal.3") }
+        }
+        .frame(width: 640, height: 620)
+    }
+}
+
+struct GeneralSettingsView: View {
     @EnvironmentObject private var library: Library
 
     var body: some View {
@@ -351,6 +389,5 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520)
     }
 }
