@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include <cerrno>
 #include <climits>
 #include <cstdint>
@@ -14,11 +15,11 @@
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/WindowsFormatting.hpp"
 
-#ifdef _WIN32
-#define APS5_VA_BEGIN(last) __builtin_sysv_va_list args; __builtin_sysv_va_start(args, last)
-#define APS5_VA_END() __builtin_sysv_va_end(args)
+#if APS5_GUEST_SYSV_VARARGS
+#define APS5_VA_BEGIN(last, fixedIntegers) APS5_SYSV_VA_LIST args; APS5_SYSV_VA_START(args, last, fixedIntegers)
+#define APS5_VA_END() APS5_SYSV_VA_END(args)
 #else
-#define APS5_VA_BEGIN(last) std::va_list args; va_start(args, last)
+#define APS5_VA_BEGIN(last, fixedIntegers) std::va_list args; va_start(args, last)
 #define APS5_VA_END() va_end(args)
 #endif
 
@@ -220,7 +221,7 @@ int APS5_VABI vswprintf_nid_postfix(char16_t* buffer, std::size_t size, const ch
 }
 
 int APS5_VABI swprintf_nid_postfix(char16_t* buffer, std::size_t size, const char16_t* format, ...) {
-    APS5_VA_BEGIN(format);
+    APS5_VA_BEGIN(format, 3);
     const int result = vswprintf_nid_postfix(buffer, size, format, reinterpret_cast<VaList*>(args));
     APS5_VA_END();
     return result;
@@ -230,7 +231,7 @@ int APS5_VABI snwprintf_s_nid_postfix(char16_t* buffer, std::size_t size, const 
     constexpr std::size_t RsizeMax = SIZE_MAX >> 1;
     int result = -1;
     if (buffer != nullptr && format != nullptr && size != 0 && size <= RsizeMax) {
-        APS5_VA_BEGIN(format);
+        APS5_VA_BEGIN(format, 3);
         try {
             const std::u16string text = FormatWide(format, reinterpret_cast<VaList*>(args), true);
             if (text.size() <= static_cast<std::size_t>(INT_MAX)) {
@@ -248,7 +249,7 @@ int APS5_VABI snwprintf_s_nid_postfix(char16_t* buffer, std::size_t size, const 
 }
 
 int APS5_VABI wprintf_nid_postfix(const char16_t* format, ...) {
-    APS5_VA_BEGIN(format);
+    APS5_VA_BEGIN(format, 1);
     int result = -1;
     try {
         const std::u16string text = FormatWide(format, reinterpret_cast<VaList*>(args));

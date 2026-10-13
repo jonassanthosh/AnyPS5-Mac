@@ -2982,6 +2982,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::buildTarget() const {
     target.fragmentShaderBarycentricEnabled = state->fragmentShaderBarycentric;
     target.nonConstantImageOffsets = state->maintenance8;
     target.narrowSubgroupClock = state->narrowSubgroupClock;
+    target.subgroupStages = state->subgroup.supportedStages;
     target.float64DenormPreserve = state->float64DenormPreserve;
     target.fixedPushSlots = state->graphicsPipelineLibrary;
     target.registrationModules = state->graphicsPipelineLibrary;

@@ -1,5 +1,6 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
@@ -466,12 +467,12 @@ int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...) {
         const auto type = File::FcntlArgumentOf(command);
         std::intptr_t argument = 0;
         if (type != File::FcntlArgument::None) {
-#ifdef _WIN32
-            __builtin_sysv_va_list arguments;
-            __builtin_sysv_va_start(arguments, command);
-            argument = type == File::FcntlArgument::Int ? __builtin_va_arg(arguments, int)
-                                                        : reinterpret_cast<std::intptr_t>(__builtin_va_arg(arguments, void*));
-            __builtin_sysv_va_end(arguments);
+#if APS5_GUEST_SYSV_VARARGS
+            APS5_SYSV_VA_LIST arguments;
+            APS5_SYSV_VA_START(arguments, command, 2);
+            argument = type == File::FcntlArgument::Int ? APS5_SYSV_VA_ARG(arguments, int)
+                                                        : reinterpret_cast<std::intptr_t>(APS5_SYSV_VA_ARG(arguments, void*));
+            APS5_SYSV_VA_END(arguments);
 #else
             std::va_list arguments;
             va_start(arguments, command);
@@ -487,11 +488,11 @@ int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...) {
     std::lock_guard lock(socket->modeMutex);
     if (command == 3) return 2 | (socket->nonblocking ? 4 : 0); // F_GETFL, O_RDWR
     if (command != 4) return Fail(22);
-#ifdef _WIN32
-    __builtin_sysv_va_list arguments;
-    __builtin_sysv_va_start(arguments, command);
-    const int flags = __builtin_va_arg(arguments, int);
-    __builtin_sysv_va_end(arguments);
+#if APS5_GUEST_SYSV_VARARGS
+    APS5_SYSV_VA_LIST arguments;
+    APS5_SYSV_VA_START(arguments, command, 2);
+    const int flags = APS5_SYSV_VA_ARG(arguments, int);
+    APS5_SYSV_VA_END(arguments);
 #else
     std::va_list arguments;
     va_start(arguments, command);

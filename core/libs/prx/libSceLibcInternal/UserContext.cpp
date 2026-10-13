@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include "prx/libc/include/GuestStacks.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
@@ -36,11 +37,11 @@ void APS5_VABI makecontext_nid_postfix(UserUcontext* context, void (APS5_VABI* s
     const auto top = (reinterpret_cast<std::uintptr_t>(context->stackPointer) + context->stackSize) & ~static_cast<std::uintptr_t>(15);
     auto* arguments = reinterpret_cast<std::uint64_t*>(top) - MaximumArguments;
     auto* stack = arguments - 1;
-#ifdef _WIN32
-    __builtin_sysv_va_list list;
-    __builtin_sysv_va_start(list, count);
-    for (int index = 0; index < count; ++index) arguments[index] = __builtin_va_arg(list, std::uint64_t);
-    __builtin_sysv_va_end(list);
+#if APS5_GUEST_SYSV_VARARGS
+    APS5_SYSV_VA_LIST list;
+    APS5_SYSV_VA_START(list, count, 3);
+    for (int index = 0; index < count; ++index) arguments[index] = APS5_SYSV_VA_ARG(list, std::uint64_t);
+    APS5_SYSV_VA_END(list);
 #else
     std::va_list list;
     va_start(list, count);

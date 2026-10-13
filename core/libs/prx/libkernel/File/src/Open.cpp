@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/General.hpp"
@@ -314,12 +315,12 @@ int APS5_VABI sceKernelFcntl(int d, int command, ...) {
     const auto type = File::FcntlArgumentOf(command);
     std::intptr_t argument = 0;
     if (type != File::FcntlArgument::None) {
-#ifdef _WIN32
-        __builtin_sysv_va_list arguments;
-        __builtin_sysv_va_start(arguments, command);
-        argument = type == File::FcntlArgument::Int ? __builtin_va_arg(arguments, int)
-                                                    : reinterpret_cast<std::intptr_t>(__builtin_va_arg(arguments, void*));
-        __builtin_sysv_va_end(arguments);
+#if APS5_GUEST_SYSV_VARARGS
+        APS5_SYSV_VA_LIST arguments;
+        APS5_SYSV_VA_START(arguments, command, 2);
+        argument = type == File::FcntlArgument::Int ? APS5_SYSV_VA_ARG(arguments, int)
+                                                    : reinterpret_cast<std::intptr_t>(APS5_SYSV_VA_ARG(arguments, void*));
+        APS5_SYSV_VA_END(arguments);
 #else
         std::va_list arguments;
         va_start(arguments, command);

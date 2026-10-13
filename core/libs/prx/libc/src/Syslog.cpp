@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "SceTypes.hpp"
 #include <cstdarg>
@@ -5,7 +6,7 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
-#ifdef _WIN32
+#if APS5_GUEST_SYSV_VARARGS
 #include "prx/libc/include/WindowsFormatting.hpp"
 #endif
 
@@ -54,7 +55,7 @@ std::string ExpandErrorText(const char* format, int error) {
 }
 
 std::string Format(const char* format, VaList* args) {
-#ifdef _WIN32
+#if APS5_GUEST_SYSV_VARARGS
     std::string buffer;
     LibcDetail::FormatWindows(nullptr, 0, format, args, &buffer);
     return buffer;
@@ -101,16 +102,16 @@ void APS5_VABI vsyslog_nid_postfix(int priority, const char* format, VaList* arg
 }
 
 void APS5_VABI syslog_nid_postfix(int priority, const char* format, ...) {
-#ifdef _WIN32
-    __builtin_sysv_va_list args;
-    __builtin_sysv_va_start(args, format);
+#if APS5_GUEST_SYSV_VARARGS
+    APS5_SYSV_VA_LIST args;
+    APS5_SYSV_VA_START(args, format, 2);
 #else
     std::va_list args;
     va_start(args, format);
 #endif
     vsyslog_nid_postfix(priority, format, reinterpret_cast<VaList*>(args));
-#ifdef _WIN32
-    __builtin_sysv_va_end(args);
+#if APS5_GUEST_SYSV_VARARGS
+    APS5_SYSV_VA_END(args);
 #else
     va_end(args);
 #endif

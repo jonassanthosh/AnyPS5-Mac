@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +12,7 @@
 #include "prx/libc/include/General.hpp"
 #include "SceTypes.hpp"
 
-#ifdef _WIN32
+#if APS5_GUEST_SYSV_VARARGS
 #include "prx/libc/include/WindowsFormatting.hpp"
 #endif
 
@@ -38,17 +39,17 @@ void* Allocate(std::size_t size) {
 
 extern "C" {
 
-#ifdef _WIN32
+#if APS5_GUEST_SYSV_VARARGS
 
 int APS5_VABI vsprintf_s_nid_postfix(char* buffer, size_t size, const char* format, VaList* args) {
     return LibcDetail::FormatWindows(buffer, size, format, args);
 }
 
 int APS5_VABI sprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
-    __builtin_sysv_va_list args;
-    __builtin_sysv_va_start(args, format);
+    APS5_SYSV_VA_LIST args;
+    APS5_SYSV_VA_START(args, format, 3);
     const int result = LibcDetail::FormatWindows(buffer, size, format, args);
-    __builtin_sysv_va_end(args);
+    APS5_SYSV_VA_END(args);
     return result;
 }
 

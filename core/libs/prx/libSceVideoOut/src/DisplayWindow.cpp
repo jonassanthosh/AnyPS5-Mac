@@ -1,4 +1,5 @@
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
+#include "prx/libSceVideoOut/include/MainThread.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
@@ -45,7 +46,7 @@ DisplayWindow::~DisplayWindow() {
 
 void DisplayWindow::Ensure(std::uint32_t sourceWidth, std::uint32_t sourceHeight) {
     require(sourceWidth != 0 && sourceHeight != 0, "source extent must be non-zero");
-    if (window == nullptr) create(sourceWidth, sourceHeight);
+    if (window == nullptr) RunOnMainThread([&] { create(sourceWidth, sourceHeight); });
     updateAspectRatio(sourceWidth, sourceHeight);
 }
 
@@ -60,6 +61,18 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     require(initialSize.width >= DisplayWindowMinimumWidth && initialSize.height >= DisplayWindowMinimumHeight, "initial window extent is smaller than the minimum");
     const auto title = GetAppTitle_nid_postfix();
     AgcDriverLockVulkanLoader_nid_postfix();
+#ifdef __APPLE__
+    static const bool vulkanLoaded = [] {
+        for (const char* candidate : {"libvulkan.1.dylib", "/opt/homebrew/lib/libvulkan.1.dylib", "/usr/local/lib/libvulkan.1.dylib"}) {
+            if (SDL_Vulkan_LoadLibrary(candidate) == 0) return true;
+        }
+        return false;
+    }();
+    if (!vulkanLoaded) {
+        AgcDriverUnlockVulkanLoader_nid_postfix();
+        require(false, "no Vulkan loader found; install MoltenVK and the Vulkan loader");
+    }
+#endif
     window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     AgcDriverUnlockVulkanLoader_nid_postfix();
     require(window != nullptr, SDL_GetError());
@@ -75,8 +88,10 @@ void DisplayWindow::updateAspectRatio(std::uint32_t sourceWidth, std::uint32_t s
 
 void DisplayWindow::Destroy() noexcept {
     if (window == nullptr) return;
-    removeSubclass();
-    SDL_DestroyWindow(window);
+    RunOnMainThread([this] {
+        removeSubclass();
+        SDL_DestroyWindow(window);
+    });
     window = nullptr;
 }
 
@@ -87,7 +102,7 @@ SDL_Window* DisplayWindow::Handle() const {
 void DisplayWindow::ToggleFullscreen() {
     require(window != nullptr, "window must exist before toggling fullscreen");
     const auto flags = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0 ? 0u : static_cast<Uint32>(SDL_WINDOW_FULLSCREEN_DESKTOP);
-    require(SDL_SetWindowFullscreen(window, flags) == 0, SDL_GetError());
+    RunOnMainThread([&] { require(SDL_SetWindowFullscreen(window, flags) == 0, SDL_GetError()); });
 }
 
 void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) const {
@@ -98,7 +113,7 @@ void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) co
     }
     int drawableWidth = 0;
     int drawableHeight = 0;
-    SDL_Vulkan_GetDrawableSize(window, &drawableWidth, &drawableHeight);
+    RunOnMainThread([&] { SDL_Vulkan_GetDrawableSize(window, &drawableWidth, &drawableHeight); });
     width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
     height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
 }
@@ -121,7 +136,7 @@ void DisplayWindow::UpdateTitle() {
     }
     char text[160];
     std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
-    SDL_SetWindowTitle(window, text);
+    RunOnMainThread([&] { SDL_SetWindowTitle(window, text); });
 }
 
 void DisplayWindow::installSubclass() {

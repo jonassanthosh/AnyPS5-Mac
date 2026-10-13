@@ -121,9 +121,16 @@ bool ValidateSampleLocations(const Context& context, const State& state) {
     return enabled;
 }
 
+VkViewport DeviceViewport(const Context& context, const VkViewport& viewport) {
+    if (context.depthRangeUnrestricted) return viewport;
+    auto clamped = viewport;
+    clamped.minDepth = std::clamp(viewport.minDepth, 0.0f, 1.0f);
+    clamped.maxDepth = std::clamp(viewport.maxDepth, 0.0f, 1.0f);
+    return clamped;
+}
+
 void ValidateViewport(const Context& context, const VkViewport& viewport) {
     Require(std::isfinite(viewport.minDepth) && std::isfinite(viewport.maxDepth), "non-finite viewport depth range");
-    Require(context.depthRangeUnrestricted || (viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1), "viewport depth outside [0, 1] requires VK_EXT_depth_range_unrestricted");
     Require(std::isfinite(viewport.x) && std::isfinite(viewport.y) && std::isfinite(viewport.width) && std::isfinite(viewport.height), "viewport arithmetic overflow");
     Require(viewport.width <= context.limits.maxViewportDimensions[0] && std::abs(viewport.height) <= context.limits.maxViewportDimensions[1], "viewport dimensions exceed device limits");
     Require(viewport.x >= context.limits.viewportBoundsRange[0] && viewport.x + viewport.width <= context.limits.viewportBoundsRange[1], "viewport X exceeds device bounds");
@@ -659,7 +666,8 @@ void Pipeline::Begin(VkCommandBuffer commands, const Framebuffer& framebuffer, V
 void Pipeline::Continue(VkCommandBuffer commands, const State& state) const {
     const auto best = optimized != nullptr ? optimized->handle.load() : VK_NULL_HANDLE;
     context.Resolved(&DeviceFunctions::cmdBindPipeline, "vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, best != VK_NULL_HANDLE ? best : pipeline);
-    context.Resolved(&DeviceFunctions::cmdSetViewport, "vkCmdSetViewport")(commands, 0, 1, &state.viewport);
+    const auto viewport = DeviceViewport(context, state.viewport);
+    context.Resolved(&DeviceFunctions::cmdSetViewport, "vkCmdSetViewport")(commands, 0, 1, &viewport);
     context.Resolved(&DeviceFunctions::cmdSetScissor, "vkCmdSetScissor")(commands, 0, 1, &state.scissor);
     if (libraries) {
         setLibraryState(commands, state);
@@ -699,7 +707,8 @@ void Pipeline::ContinueSecondChannel(VkCommandBuffer commands) const {
 void Pipeline::ContinueBackFaces(VkCommandBuffer commands, const State& state) const {
     Require(backFaces != VK_NULL_HANDLE, "the pipeline draws both faces in one pass");
     context.Resolved(&DeviceFunctions::cmdBindPipeline, "vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, backFaces);
-    context.Resolved(&DeviceFunctions::cmdSetViewport, "vkCmdSetViewport")(commands, 0, 1, &state.viewport);
+    const auto viewport = DeviceViewport(context, state.viewport);
+    context.Resolved(&DeviceFunctions::cmdSetViewport, "vkCmdSetViewport")(commands, 0, 1, &viewport);
     context.Resolved(&DeviceFunctions::cmdSetScissor, "vkCmdSetScissor")(commands, 0, 1, &state.scissor);
     context.Resolved(&DeviceFunctions::cmdSetDepthBias, "vkCmdSetDepthBias")(commands, state.backDepthBiasConstant, state.depthBiasClamp, state.backDepthBiasSlope);
     if (depthBounds) context.Resolved(&DeviceFunctions::cmdSetDepthBounds, "vkCmdSetDepthBounds")(commands, state.minDepthBounds, state.maxDepthBounds);

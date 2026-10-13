@@ -42,7 +42,7 @@ extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetIndexBuffer(CommandBuffer* buf, 
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetBaseIndirectArgs(CommandBuffer* buf, std::uint32_t shaderType, const volatile void* indirectBaseAddr);
 extern "C" std::uint32_t* APS5_VABI sceAgcSetNop(CommandBuffer* buf, std::uint32_t sizeDw);
 extern "C" int APS5_VABI sceAgcDebugRaiseException(std::uint32_t exceptionId);
-extern "C" std::uint32_t* APS5_VABI sceAgcAcbAtomicGds_0900(CommandBuffer* buf, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, std::uint32_t data, std::uint64_t compareData, std::uint64_t extraData);
+extern "C" std::uint32_t* APS5_VABI sceAgcAcbAtomicGds_0900(CommandBuffer* buf, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, GuestStackArg<std::uint32_t> data, std::uint64_t compareData, std::uint64_t extraData);
 
 namespace {
 

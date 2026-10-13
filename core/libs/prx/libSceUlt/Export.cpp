@@ -237,7 +237,7 @@ std::uint64_t APS5_VABI sceUltQueueDataResourcePoolGetWorkAreaSize(std::uint32_t
     return alignUp(dataArea + queueArea, 8u);
 }
 
-int APS5_VABI sceUltQueueDataResourcePoolCreate(void* pool, const char* name, std::uint32_t numData, std::uint64_t dataSize, std::uint32_t numQueueObject, void* waitingQueueResourcePool, void* workArea, const void* optParam, std::uint32_t buildVersion) {
+int APS5_VABI sceUltQueueDataResourcePoolCreate(void* pool, const char* name, std::uint32_t numData, std::uint64_t dataSize, std::uint32_t numQueueObject, void* waitingQueueResourcePool, void* workArea, const void* optParam, GuestStackArg<std::uint32_t> buildVersion) {
     (void)name;
     (void)buildVersion;
     if (pool == nullptr) {
@@ -480,7 +480,7 @@ int APS5_VABI sceUltUlthreadRuntimeCreate(void* runtime, const char* name, std::
     return ULT_OK;
 }
 
-int APS5_VABI sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthreadEntry entry, std::uint64_t arg, void* context, std::uint64_t sizeContext, void* runtime, const void* optParam, std::uint32_t buildVersion) {
+int APS5_VABI sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthreadEntry entry, std::uint64_t arg, void* context, std::uint64_t sizeContext, void* runtime, const void* optParam, GuestStackArg<std::uint32_t> buildVersion) {
     (void)context;
     (void)sizeContext;
     (void)optParam;
@@ -588,7 +588,7 @@ int APS5_VABI _sceUltMutexCreate(void* mutex, const char* name, void* waitingQue
     return sceUltMutexCreate(mutex, name, waitingQueueResourcePool, optParam, buildVersion);
 }
 
-int APS5_VABI _sceUltQueueDataResourcePoolCreate(void* pool, const char* name, std::uint32_t numData, std::uint64_t dataSize, std::uint32_t numQueueObject, void* waitingQueueResourcePool, void* workArea, const void* optParam, std::uint32_t buildVersion) {
+int APS5_VABI _sceUltQueueDataResourcePoolCreate(void* pool, const char* name, std::uint32_t numData, std::uint64_t dataSize, std::uint32_t numQueueObject, void* waitingQueueResourcePool, void* workArea, const void* optParam, GuestStackArg<std::uint32_t> buildVersion) {
     return sceUltQueueDataResourcePoolCreate(pool, name, numData, dataSize, numQueueObject, waitingQueueResourcePool, workArea, optParam, buildVersion);
 }
 
@@ -604,7 +604,7 @@ int APS5_VABI _sceUltUlthreadRuntimeCreate(void* runtime, const char* name, std:
     return sceUltUlthreadRuntimeCreate(runtime, name, maxNumUlthread, numWorkerThread, workArea, optParam, buildVersion);
 }
 
-int APS5_VABI _sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthreadEntry entry, std::uint64_t arg, void* context, std::uint64_t sizeContext, void* runtime, const void* optParam, std::uint32_t buildVersion) {
+int APS5_VABI _sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthreadEntry entry, std::uint64_t arg, void* context, std::uint64_t sizeContext, void* runtime, const void* optParam, GuestStackArg<std::uint32_t> buildVersion) {
     return sceUltUlthreadCreate(ulthread, name, entry, arg, context, sizeContext, runtime, optParam, buildVersion);
 }
 

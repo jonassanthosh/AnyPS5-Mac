@@ -5,6 +5,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libc/include/CpuTopology.hpp"
+#include "prx/libc/include/GuestThreadStack.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -109,10 +110,15 @@ static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
     return *high > *low;
 }
 
+static bool GuestStackLimits(std::size_t desired, std::uintptr_t* low, std::uintptr_t* high) {
+    if (GuestThreadStack_nid_no_patch(desired, low, high)) return true;
+    return HostStackLimits(low, high);
+}
+
 static void SetStackFromHost(PthreadPrivate* thread) {
     std::uintptr_t low = 0;
     std::uintptr_t high = 0;
-    if (!HostStackLimits(&low, &high)) throw std::runtime_error("Cannot query the host thread stack");
+    if (!GuestStackLimits(0, &low, &high)) throw std::runtime_error("Cannot query the host thread stack");
     thread->stackAddress = reinterpret_cast<void*>(low);
     thread->stackSize = static_cast<std::size_t>(high - low);
 }
@@ -123,7 +129,7 @@ static bool CurrentStack(std::uintptr_t* low, std::uintptr_t* high) {
         *high = *low + CurrentGuestState().current->stackSize;
         return true;
     }
-    return HostStackLimits(low, high);
+    return GuestStackLimits(0, low, high);
 }
 
 static void RegisterStack(PthreadPrivate* self) {
@@ -520,10 +526,15 @@ static void* StartNativeThread(void* opaque) {
     try {
         std::uintptr_t low = 0;
         std::uintptr_t high = 0;
-        const auto reserve = HostStackReserve();
-        if (!HostStackLimits(&low, &high) || high - low < reserve + self->stackSize)
-            throw std::runtime_error("Cannot query guest thread stack");
-        self->stackAddress = reinterpret_cast<void*>(high - reserve - self->stackSize);
+        if (GuestThreadStack_nid_no_patch(self->stackSize, &low, &high)) {
+            self->stackAddress = reinterpret_cast<void*>(low);
+            self->stackSize = static_cast<std::size_t>(high - low);
+        } else {
+            const auto reserve = HostStackReserve();
+            if (!HostStackLimits(&low, &high) || high - low < reserve + self->stackSize)
+                throw std::runtime_error("Cannot query guest thread stack");
+            self->stackAddress = reinterpret_cast<void*>(high - reserve - self->stackSize);
+        }
         self->threadId = std::this_thread::get_id();
         args->initialized.set_value();
     } catch (...) {

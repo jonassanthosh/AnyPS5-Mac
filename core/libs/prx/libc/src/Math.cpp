@@ -410,6 +410,9 @@ struct alignas(16) LibcFloatConstant { std::uint32_t bits[4]; };
 LibcFloatConstant _FInf_nid_postfix {{0x7f800000u, 0, 0, 0}};
 LibcFloatConstant _FNan_nid_postfix {{0x7fc00000u, 0, 0, 0}};
 
+struct alignas(16) LibcDoubleConstant { std::uint64_t bits[2]; };
+LibcDoubleConstant _Inf_nid_postfix {{0x7ff0000000000000ull, 0}};
+
 short APS5_VABI _FDtest_nid_postfix(const float* value) {
     constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
     if (value == nullptr) throw std::invalid_argument("_FDtest: null value");
@@ -418,6 +421,17 @@ short APS5_VABI _FDtest_nid_postfix(const float* value) {
     const auto exponent = bits & 0x7f800000u;
     const auto fraction = bits & 0x007fffffu;
     if (exponent == 0x7f800000u) return fraction != 0 ? NotANumber : Infinite;
+    if (exponent == 0) return fraction != 0 ? Denormal : Zero;
+    return Finite;
+}
+short APS5_VABI _Dtest_nid_postfix(const double* value) {
+    constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
+    if (value == nullptr) throw std::invalid_argument("_Dtest: null value");
+    std::uint64_t bits;
+    std::memcpy(&bits, value, sizeof(bits));
+    const auto exponent = bits & 0x7ff0000000000000ull;
+    const auto fraction = bits & 0x000fffffffffffffull;
+    if (exponent == 0x7ff0000000000000ull) return fraction != 0 ? NotANumber : Infinite;
     if (exponent == 0) return fraction != 0 ? Denormal : Zero;
     return Finite;
 }

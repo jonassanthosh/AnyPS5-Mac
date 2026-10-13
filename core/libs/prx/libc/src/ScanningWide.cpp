@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -381,24 +382,24 @@ extern "C" {
 
 int APS5_VABI swscanf_s_nid_postfix(const char16_t* buffer, const char16_t* format, ...) {
     if (buffer == nullptr || format == nullptr) return EOF;
-#ifdef _WIN32
-    __builtin_sysv_va_list args;
-    __builtin_sysv_va_start(args, format);
+#if APS5_GUEST_SYSV_VARARGS
+    APS5_SYSV_VA_LIST args;
+    APS5_SYSV_VA_START(args, format, 2);
 #else
     std::va_list args;
     va_start(args, format);
 #endif
     try {
         const int result = WideScanner(buffer, format, args).Run();
-#ifdef _WIN32
-        __builtin_sysv_va_end(args);
+#if APS5_GUEST_SYSV_VARARGS
+        APS5_SYSV_VA_END(args);
 #else
         va_end(args);
 #endif
         return result;
     } catch (...) {
-#ifdef _WIN32
-        __builtin_sysv_va_end(args);
+#if APS5_GUEST_SYSV_VARARGS
+        APS5_SYSV_VA_END(args);
 #else
         va_end(args);
 #endif

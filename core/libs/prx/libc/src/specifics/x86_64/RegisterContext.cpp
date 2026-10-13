@@ -89,6 +89,30 @@ asm(
 "movq 64(%r10),%r8\nmovq 72(%r10),%r9\nmovq 96(%r10),%r12\n"
 "movq 104(%r10),%r13\nmovq 112(%r10),%r14\nmovq 120(%r10),%r15\njmp *%r11\n"
 );
+#elif defined(__APPLE__) && defined(__aarch64__)
+#include "prx/libc/include/GuestRegisters.hpp"
+
+constexpr unsigned GuestDwarfToEncoding[16] = {0, 2, 1, 3, 6, 7, 5, 4, 8, 9, 10, 11, 12, 13, 14, 15};
+
+bool LibcCaptureGuestCaller(std::uintptr_t* registers) {
+    GuestRegisterFile file{};
+    if (!GuestRegistersCapture_nid_no_patch(&file)) return false;
+    for (unsigned i = 0; i < 16; ++i) registers[i] = file.gpr[GuestDwarfToEncoding[i]];
+    const auto rsp = file.gpr[4];
+    registers[7] = rsp + 8;
+    registers[16] = *reinterpret_cast<const std::uintptr_t*>(rsp);
+    return true;
+}
+
+void LibcCaptureRegisters(std::uintptr_t*) { std::abort(); }
+
+[[noreturn]] void LibcRestoreRegisters(const std::uintptr_t* registers) {
+    GuestRegisterFile file{};
+    if (!GuestRegistersCapture_nid_no_patch(&file)) std::abort();
+    for (unsigned i = 0; i < 16; ++i) file.gpr[GuestDwarfToEncoding[i]] = registers[i];
+    file.rip = registers[16];
+    GuestRegistersInstall_nid_no_patch(&file);
+}
 #else
 void LibcCaptureRegisters(std::uintptr_t*) { std::abort(); }
 [[noreturn]] void LibcRestoreRegisters(const std::uintptr_t*) { std::abort(); }

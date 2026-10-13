@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/GuestVarArgs.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstddef>
@@ -666,11 +667,11 @@ int APS5_VABI creat_nid_postfix(const char* path, int mode) {
 int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
     int mode = 0;
     if (flags & SCE_KERNEL_O_CREAT) {
-#ifdef _WIN32
-        __builtin_sysv_va_list arguments;
-        __builtin_sysv_va_start(arguments, flags);
-        mode = __builtin_va_arg(arguments, int);
-        __builtin_sysv_va_end(arguments);
+#if APS5_GUEST_SYSV_VARARGS
+        APS5_SYSV_VA_LIST arguments;
+        APS5_SYSV_VA_START(arguments, flags, 2);
+        mode = APS5_SYSV_VA_ARG(arguments, int);
+        APS5_SYSV_VA_END(arguments);
 #else
         std::va_list arguments;
         va_start(arguments, flags);

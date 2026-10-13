@@ -40,6 +40,10 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include "prx/libc/include/specifics/linux/HostMapping.hpp"
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #endif
 
 namespace AgcDriver::GuestMemory {
@@ -556,6 +560,37 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
             constexpr auto mask = static_cast<std::uintptr_t>(PageBytes - 1);
             pages.record(cursor & ~mask, (next + mask) & ~mask, readable, writable, generation);
         };
+#ifdef __APPLE__
+        const TimedAccess timed(CounterQuery, 0);
+        mach_vm_address_t regionAddress = cursor;
+        mach_vm_size_t regionSize = 0;
+        vm_region_basic_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        const auto status = mach_vm_region(mach_task_self(), &regionAddress, &regionSize, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object);
+        if (status == KERN_INVALID_ADDRESS) {
+            static_cast<void>(emit(PageRun{cursor, end, false, false}));
+            return true;
+        }
+        if (status != KERN_SUCCESS || regionSize == 0) return false;
+        if (regionAddress > cursor) {
+            const auto gapEnd = static_cast<std::uintptr_t>(std::min<mach_vm_address_t>(end, regionAddress));
+            if (!emit(PageRun{cursor, gapEnd, false, false})) return true;
+            cursor = gapEnd;
+            continue;
+        }
+        auto next = static_cast<std::uintptr_t>(std::min<mach_vm_address_t>(end, regionAddress + regionSize));
+        int protection = info.protection;
+        std::uintptr_t watchedEnd = next;
+        if (const int watched = GuestWriteWatch::GuestWriteWatchProtection_nid_postfix(cursor, next, &watchedEnd); watched >= 0) protection = watched;
+        next = std::min(next, watchedEnd);
+        const bool readable = (protection & VM_PROT_READ) != 0;
+        const bool writable = readable && (protection & VM_PROT_WRITE) != 0;
+        recordRun(next, readable, writable);
+        if (!emit(PageRun{cursor, next, readable, writable})) return true;
+        cursor = next;
+        continue;
+#endif
         if (const int fd = HostMapping::QueryFd(); fd >= 0) {
             procmap_query query{};
             query.size = sizeof(query);

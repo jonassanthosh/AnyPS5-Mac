@@ -10,7 +10,7 @@
 extern "C" {
 std::uint32_t APS5_VABI sceAgcDcbQueueEndOfShaderActionGetSize();
 std::uint32_t APS5_VABI sceAgcAcbQueueEndOfShaderActionGetSize();
-std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer*, std::uint8_t, std::uint16_t, std::uint8_t, std::uint8_t, const volatile Label*, std::uint8_t, std::uint64_t, std::uint16_t, std::uint16_t, std::uint8_t, std::uint32_t);
+std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer*, std::uint8_t, std::uint16_t, std::uint8_t, std::uint8_t, const volatile Label*, std::uint8_t, std::uint64_t, GuestStackArg<std::uint16_t>, GuestStackArg<std::uint16_t>, GuestStackArg<std::uint8_t>, GuestStackArg<std::uint32_t>);
 }
 
 namespace {

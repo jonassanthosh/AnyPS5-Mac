@@ -42,4 +42,19 @@ void APS5_VABI sceLibcInternalHeapErrorReportForGame_nid_postfix(void* heap, voi
     NotImplemented_nid_no_patch(__func__);
 }
 
+int APS5_VABI sceLibcBacktraceGetBufferSize_nid_postfix(void* context, std::uint32_t* frames, std::size_t* bytes, std::int32_t flags) {
+    (void)context;
+    (void)flags;
+    if (frames != nullptr) *frames = 0;
+    if (bytes != nullptr) *bytes = 0;
+    return -1;
+}
+
+int APS5_VABI sceLibcBacktraceSelf_nid_postfix(std::uint32_t flags, void* buffer, std::size_t bytes) {
+    (void)flags;
+    (void)buffer;
+    (void)bytes;
+    return 0;
+}
+
 }

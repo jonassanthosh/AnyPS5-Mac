@@ -2,6 +2,7 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestRegisters.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include <array>
@@ -410,12 +411,38 @@ void ToHost(const GuestMcontext& m, mcontext_t& host) {
     std::memcpy(&host->__fs.__fpu_fcw, m.fpstate, FxsaveRegisterBytes);
 }
 #else
-void FromHost(const mcontext_t&, GuestMcontext&) {
-    throw std::runtime_error("sceKernelRaiseException: the guest registers of a translated thread are not in the host signal context");
+void FromHost(const mcontext_t&, GuestMcontext& m) {
+    GuestRegisterFile registers{};
+    if (!GuestRegistersCapture_nid_no_patch(&registers)) {
+        throw std::runtime_error("sceKernelRaiseException: the target thread has no guest register state");
+    }
+    const auto* g = registers.gpr;
+    m.rax = g[0];
+    m.rcx = g[1];
+    m.rdx = g[2];
+    m.rbx = g[3];
+    m.rsp = g[4];
+    m.rbp = g[5];
+    m.rsi = g[6];
+    m.rdi = g[7];
+    m.r8 = g[8];
+    m.r9 = g[9];
+    m.r10 = g[10];
+    m.r11 = g[11];
+    m.r12 = g[12];
+    m.r13 = g[13];
+    m.r14 = g[14];
+    m.r15 = g[15];
+    m.rip = registers.rip;
+    m.rflags = registers.rflags;
+    m.fsbase = registers.fsBase;
+    m.len = sizeof(GuestMcontext);
+    auto* fx = reinterpret_cast<std::uint8_t*>(m.fpstate);
+    std::memcpy(fx + 24, &registers.mxcsr, sizeof(registers.mxcsr));
+    std::memcpy(fx + 160, registers.xmm, sizeof(registers.xmm));
 }
 
 void ToHost(const GuestMcontext&, mcontext_t&) {
-    throw std::runtime_error("sceKernelRaiseException: the guest registers of a translated thread are not in the host signal context");
 }
 #endif
 

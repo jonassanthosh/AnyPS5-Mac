@@ -8,7 +8,7 @@
 
 extern "C" {
 
-std::uint32_t* APS5_VABI sceAgcCbBranch(CommandBuffer* buf, std::uint8_t mode, std::uint8_t compareFunction, const volatile std::uint64_t* compareAddress, std::uint64_t mask, std::uint64_t reference, std::uint8_t cachePolicy1, const volatile std::uint32_t* buffer1, std::uint32_t sizeInDwords1, std::uint8_t cachePolicy2, const volatile std::uint32_t* buffer2, std::uint32_t sizeInDwords2) {
+std::uint32_t* APS5_VABI sceAgcCbBranch(CommandBuffer* buf, std::uint8_t mode, std::uint8_t compareFunction, const volatile std::uint64_t* compareAddress, std::uint64_t mask, std::uint64_t reference, std::uint8_t cachePolicy1, const volatile std::uint32_t* buffer1, GuestStackArg<std::uint32_t> sizeInDwords1, GuestStackArg<std::uint8_t> cachePolicy2, const volatile std::uint32_t* buffer2, GuestStackArg<std::uint32_t> sizeInDwords2) {
     Agc::Command::CheckBits(mode, 3, __func__);
     Agc::Command::CheckBits(compareFunction, 7, __func__);
     Agc::Command::CheckBits(cachePolicy1, 3, __func__);
