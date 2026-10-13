@@ -9,9 +9,12 @@
 #include <array>
 #include <bit>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace ShaderRecompiler {
 namespace {
@@ -29,9 +32,57 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(std::string("Rect-list SPIR-V: ") + message);
 }
 
+struct Distances {
+    std::uint32_t clip = 0;
+    std::uint32_t cull = 0;
+};
+
+Distances VertexDistances(const std::vector<std::uint32_t>& words) {
+    std::map<std::uint32_t, std::uint32_t> builtinVariables;
+    std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> builtinMembers;
+    std::map<std::uint32_t, std::uint32_t> pointees;
+    std::map<std::uint32_t, std::uint32_t> variableTypes;
+    std::map<std::uint32_t, std::uint32_t> arrayLengths;
+    std::map<std::uint32_t, std::uint32_t> constants;
+    std::map<std::uint32_t, std::vector<std::uint32_t>> structs;
+    for (std::size_t offset = 5; offset < words.size();) {
+        const auto count = words[offset] >> spv::WordCountShift;
+        require(count != 0 && count <= words.size() - offset, "malformed vertex SPIR-V");
+        const auto opcode = words[offset] & spv::OpCodeMask;
+        const auto* operand = &words[offset + 1];
+        if (opcode == spv::OpDecorate && count == 4 && operand[1] == spv::DecorationBuiltIn) builtinVariables[operand[0]] = operand[2];
+        if (opcode == spv::OpMemberDecorate && count == 5 && operand[2] == spv::DecorationBuiltIn) builtinMembers[{operand[0], operand[1]}] = operand[3];
+        if (opcode == spv::OpTypePointer && count == 4) pointees[operand[0]] = operand[2];
+        if (opcode == spv::OpVariable && count >= 4 && operand[2] == spv::StorageClassOutput) variableTypes[operand[1]] = operand[0];
+        if (opcode == spv::OpTypeArray && count == 4) arrayLengths[operand[0]] = operand[2];
+        if (opcode == spv::OpConstant && count == 4) constants[operand[1]] = operand[2];
+        if (opcode == spv::OpTypeStruct && count >= 2) structs[operand[0]].assign(operand + 1, operand + count - 1);
+        offset += count;
+    }
+    Distances distances;
+    const auto record = [&](std::uint32_t builtin, std::uint32_t type) {
+        if (builtin != spv::BuiltInClipDistance && builtin != spv::BuiltInCullDistance) return;
+        const auto length = arrayLengths.find(type);
+        require(length != arrayLengths.end() && constants.contains(length->second), "vertex clip or cull distances are not a sized array");
+        (builtin == spv::BuiltInClipDistance ? distances.clip : distances.cull) = constants[length->second];
+    };
+    for (const auto& [variable, pointer] : variableTypes) {
+        const auto pointee = pointees.find(pointer);
+        if (pointee == pointees.end()) continue;
+        if (const auto builtin = builtinVariables.find(variable); builtin != builtinVariables.end()) record(builtin->second, pointee->second);
+        if (const auto members = structs.find(pointee->second); members != structs.end()) {
+            for (std::uint32_t member = 0; member < members->second.size(); ++member) {
+                if (const auto builtin = builtinMembers.find({pointee->second, member}); builtin != builtinMembers.end()) record(builtin->second, members->second[member]);
+            }
+        }
+    }
+    require(distances.clip <= 8 && distances.cull <= 8 && distances.clip + distances.cull <= 8, "more than eight vertex clip and cull distances");
+    return distances;
+}
+
 class RectListEmitter {
 public:
-    RectListEmitter(const std::vector<Parameter>& parameters, spv::ExecutionModel model, std::uint32_t version, std::uint32_t faultBinding) : builder(version), faultBinding(faultBinding), version(version), parameters(parameters) {
+    RectListEmitter(const std::vector<Parameter>& parameters, Distances distances, spv::ExecutionModel model, std::uint32_t version, std::uint32_t faultBinding) : builder(version), faultBinding(faultBinding), version(version), parameters(parameters), distances(distances) {
         builder.AddMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
 
         voidType = type(spv::OpTypeVoid);
@@ -41,7 +92,17 @@ public:
         vec4FloatType = type(spv::OpTypeVector, floatType, 4u);
         functionType = type(spv::OpTypeFunction, voidType);
 
-        perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpMemberDecorate, {1u, spv::DecorationBuiltIn, spv::BuiltInClipDistance}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType, array(floatType, 1u));
+        clipMember = 1u;
+        cullMember = distances.clip > 0 ? 2u : 1u;
+        if (distances.clip > 0 && distances.cull > 0) {
+            perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpMemberDecorate, {clipMember, spv::DecorationBuiltIn, spv::BuiltInClipDistance}}, {spv::OpMemberDecorate, {cullMember, spv::DecorationBuiltIn, spv::BuiltInCullDistance}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType, array(floatType, distances.clip), array(floatType, distances.cull));
+        } else if (distances.clip > 0) {
+            perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpMemberDecorate, {clipMember, spv::DecorationBuiltIn, spv::BuiltInClipDistance}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType, array(floatType, distances.clip));
+        } else if (distances.cull > 0) {
+            perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpMemberDecorate, {cullMember, spv::DecorationBuiltIn, spv::BuiltInCullDistance}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType, array(floatType, distances.cull));
+        } else {
+            perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType);
+        }
 
         ptrInputVec4Float = pointer(spv::StorageClassInput, vec4FloatType);
         ptrOutputVec4Float = pointer(spv::StorageClassOutput, vec4FloatType);
@@ -116,13 +177,19 @@ public:
 
         const auto position = result(spv::OpSelect, vec4FloatType, isFourth, position3, load(vec4FloatType, access(ptrInputVec4Float, glIn, index, intConstant(0))));
         store(access(ptrOutputVec4Float, glOut, invocation, intConstant(0)), position);
-        auto clip3 = constant(floatType, 0);
-        for (std::uint32_t i = 0; i < 3; i++) {
-            const auto clip = load(floatType, access(ptrInputFloat, glIn, intConstant(i), intConstant(1), intConstant(0)));
-            clip3 = result(spv::OpFAdd, floatType, clip3, result(spv::OpFMul, floatType, clip, barycentric[i]));
-        }
-        const auto clip = result(spv::OpSelect, floatType, fourth, clip3, load(floatType, access(ptrInputFloat, glIn, index, intConstant(1), intConstant(0))));
-        store(access(ptrOutputFloat, glOut, invocation, intConstant(1), intConstant(0)), clip);
+        const auto passDistances = [&](std::uint32_t member, std::uint32_t count) {
+            for (std::uint32_t element = 0; element < count; ++element) {
+                auto corner = constant(floatType, 0);
+                for (std::uint32_t i = 0; i < 3; i++) {
+                    const auto distance = load(floatType, access(ptrInputFloat, glIn, intConstant(i), intConstant(member), intConstant(element)));
+                    corner = result(spv::OpFAdd, floatType, corner, result(spv::OpFMul, floatType, distance, barycentric[i]));
+                }
+                const auto distance = result(spv::OpSelect, floatType, fourth, corner, load(floatType, access(ptrInputFloat, glIn, index, intConstant(member), intConstant(element))));
+                store(access(ptrOutputFloat, glOut, invocation, intConstant(member), intConstant(element)), distance);
+            }
+        };
+        passDistances(clipMember, distances.clip);
+        passDistances(cullMember, distances.cull);
 
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
             if (parameters[i].missing) {
@@ -156,7 +223,8 @@ public:
 
         const auto position = load(vec4FloatType, access(ptrInputVec4Float, glIn, index, intConstant(0)));
         store(access(ptrOutputVec4Float, glOut, intConstant(0)), position);
-        store(access(ptrOutputFloat, glOut, intConstant(1), intConstant(0)), load(floatType, access(ptrInputFloat, glIn, index, intConstant(1), intConstant(0))));
+        for (std::uint32_t element = 0; element < distances.clip; ++element) store(access(ptrOutputFloat, glOut, intConstant(clipMember), intConstant(element)), load(floatType, access(ptrInputFloat, glIn, index, intConstant(clipMember), intConstant(element))));
+        for (std::uint32_t element = 0; element < distances.cull; ++element) store(access(ptrOutputFloat, glOut, intConstant(cullMember), intConstant(element)), load(floatType, access(ptrInputFloat, glIn, index, intConstant(cullMember), intConstant(element))));
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
             store(outputs[i], load(vec4FloatType, access(ptrInputVec4Float, inputs[i], index)));
         }
@@ -287,7 +355,8 @@ private:
     void defineEntry(spv::ExecutionModel model) {
         builder.EmitCapability(spv::CapabilityShader);
         builder.EmitCapability(spv::CapabilityTessellation);
-        builder.EmitCapability(spv::CapabilityClipDistance);
+        if (distances.clip > 0) builder.EmitCapability(spv::CapabilityClipDistance);
+        if (distances.cull > 0) builder.EmitCapability(spv::CapabilityCullDistance);
         main = result(spv::OpFunction, voidType, spv::FunctionControlMaskNone, functionType);
         if (model == spv::ExecutionModelTessellationControl) {
             builder.AddExecutionMode(main, spv::ExecutionModeOutputVertices, 4u);
@@ -362,6 +431,9 @@ private:
     std::uint32_t version;
     std::uint32_t fault = 0;
     const std::vector<Parameter>& parameters;
+    Distances distances;
+    std::uint32_t clipMember = 0;
+    std::uint32_t cullMember = 0;
     std::vector<std::uint32_t> interfaces;
     std::vector<std::uint32_t> inputs;
     std::vector<std::uint32_t> outputs;
@@ -396,7 +468,10 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
     require(target.tessellation.has_value(), "tessellation shaders are unavailable");
     require(target.spirvVersion >= 0x00010300u && target.spirvVersion <= 0x00010500u, "unsupported SPIR-V target version");
     require(std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), spv::CapabilityTessellation) != target.supportedCapabilities.end(), "tessellation capability is unavailable");
-    require(std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), spv::CapabilityClipDistance) != target.supportedCapabilities.end(), "clip distance capability is unavailable");
+    const auto distances = VertexDistances(vertex.spirv.Words());
+    const auto supports = [&](spv::Capability capability) { return std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), capability) != target.supportedCapabilities.end(); };
+    require(distances.clip == 0 || supports(spv::CapabilityClipDistance), "clip distance capability is unavailable");
+    require(distances.cull == 0 || supports(spv::CapabilityCullDistance), "cull distance capability is unavailable");
     std::vector<Parameter> parameters;
     std::set<std::uint32_t> locations;
     for (const auto& input : fragment.fragmentParameters) {
@@ -413,8 +488,8 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
     const auto components = static_cast<std::uint32_t>((parameters.size() + 1) * 4);
     require(limits.maxPatchSize >= 4 && components <= limits.maxControlPerVertexInputComponents && components <= limits.maxControlPerVertexOutputComponents && components <= limits.maxEvaluationInputComponents && components <= limits.maxEvaluationOutputComponents && limits.maxControlPerPatchOutputComponents >= 6 && components * 4 + 6 <= limits.maxControlTotalOutputComponents, "tessellation interface exceeds device limits");
     const auto faultBinding = RuntimeAbi::BindingNumber(RuntimeAbi::Stage::TessellationControl, RuntimeAbi::Binding::FaultBuffer);
-    RectListEmitter control(parameters, spv::ExecutionModelTessellationControl, target.spirvVersion, faultBinding);
-    RectListEmitter evaluation(parameters, spv::ExecutionModelTessellationEvaluation, target.spirvVersion, faultBinding);
+    RectListEmitter control(parameters, distances, spv::ExecutionModelTessellationControl, target.spirvVersion, faultBinding);
+    RectListEmitter evaluation(parameters, distances, spv::ExecutionModelTessellationEvaluation, target.spirvVersion, faultBinding);
     RectListShaders shaders;
     shaders.control.spirv = control.EmitControl();
     shaders.control.bindings.push_back({DescriptorKind::StorageBuffer, DescriptorRole::FaultBuffer, 0, faultBinding, 1, {}});

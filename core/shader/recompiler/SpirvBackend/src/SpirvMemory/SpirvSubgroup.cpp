@@ -1,5 +1,7 @@
 #include "SpirvBackend/SpirvEmitter.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
+#include "SpirvBackend/SpirvMemory/SpirvSubgroup.hpp"
+#include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
 #include <stdexcept>
 #include <string>
@@ -15,7 +17,7 @@ namespace ShaderRecompiler
     namespace {
 
         std::uint32_t HostInvocationId(SpirvEmitterState& state) {
-            if (state.singleLaneWave) return ConstantU32(state, 0u);
+            if (HostSubgroupSingleLane(state)) return ConstantU32(state, 0u);
             if (state.subgroupLocalInvocationIdVariable == 0) {
                 FailEmit("SubgroupLocalInvocationId was not declared before function emission");
             }
@@ -24,6 +26,60 @@ namespace ShaderRecompiler
             return value;
         }
 
+    }
+
+    static void LoadConvergent(SpirvEmitterState& state, std::uint32_t type, std::uint32_t result, std::uint32_t value) {
+        auto [slot, inserted] = state.subgroupResultVariables.try_emplace(type, 0u);
+        if (inserted) {
+            slot->second = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPrivate, type), spv::StorageClassPrivate);
+            if (state.spirvVersion >= 0x00010400u) state.interfaceVariables.push_back(slot->second);
+        }
+        state.module.AddFunction(spv::OpStore, slot->second, value);
+        state.module.AddFunction(spv::OpLoad, type, result, slot->second);
+    }
+
+    bool HostSubgroupSingleLane(const SpirvEmitterState& state) {
+        return state.hostSubgroupSize == 1u;
+    }
+
+    void EmitSubgroupBallot(SpirvEmitterState& state, std::uint32_t result, std::uint32_t predicate) {
+        if (HostSubgroupSingleLane(state)) {
+            const auto zero = ConstantU32(state, 0u);
+            const auto own = Select(state, TypeU32(state), predicate, ConstantU32(state, 1u), zero);
+            state.module.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4u), result, own, zero, zero, zero);
+            return;
+        }
+        const auto ballot = state.module.AllocateId();
+        state.module.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4u), ballot, ConstantU32(state, spv::ScopeSubgroup), predicate);
+        LoadConvergent(state, TypeU32Vector(state, 4u), result, ballot);
+    }
+
+    void EmitSubgroupBallotFindLsb(SpirvEmitterState& state, std::uint32_t result, std::uint32_t ballot) {
+        if (HostSubgroupSingleLane(state)) {
+            const auto own = state.module.AllocateId();
+            state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), own, ballot, 0u);
+            state.module.AddFunction(spv::OpExtInst, TypeU32(state), result, GlslStd450(state), GLSLstd450FindILsb, own);
+            return;
+        }
+        state.module.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup), ballot);
+    }
+
+    void EmitSubgroupShuffle(SpirvEmitterState& state, std::uint32_t type, std::uint32_t result, std::uint32_t value, std::uint32_t lane) {
+        if (HostSubgroupSingleLane(state)) {
+            state.module.AddFunction(spv::OpCopyObject, type, result, value);
+            return;
+        }
+        const auto shuffled = state.module.AllocateId();
+        state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, shuffled, ConstantU32(state, spv::ScopeSubgroup), value, lane);
+        LoadConvergent(state, type, result, shuffled);
+    }
+
+    void EmitSubgroupElect(SpirvEmitterState& state, std::uint32_t result) {
+        if (HostSubgroupSingleLane(state)) {
+            state.module.AddFunction(spv::OpCopyObject, TypeBool(state), result, ConstantBool(state, true));
+            return;
+        }
+        state.module.AddFunction(spv::OpGroupNonUniformElect, TypeBool(state), result, ConstantU32(state, spv::ScopeSubgroup));
     }
 
     std::uint32_t EmitSubgroupLocalInvocationId(SpirvEmitterState& state) {
@@ -39,44 +95,9 @@ namespace ShaderRecompiler
     }
 
     std::uint32_t EmitConvergentResult(SpirvEmitterState& state, std::uint32_t type, std::uint32_t value) {
-        auto [slot, inserted] = state.subgroupResultVariables.try_emplace(type, 0u);
-        if (inserted) {
-            slot->second = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPrivate, type), spv::StorageClassPrivate);
-            if (state.spirvVersion >= 0x00010400u) state.interfaceVariables.push_back(slot->second);
-        }
-        state.module.AddFunction(spv::OpStore, slot->second, value);
         const auto loaded = state.module.AllocateId();
-        state.module.AddFunction(spv::OpLoad, type, loaded, slot->second);
+        LoadConvergent(state, type, loaded, value);
         return loaded;
-    }
-
-    std::uint32_t EmitSubgroupBallot(SpirvEmitterState& state, std::uint32_t predicate) {
-        const auto ballotType = TypeU32Vector(state, 4u);
-        const auto ballot = state.module.AllocateId();
-        if (state.singleLaneWave) {
-            const auto bit = state.module.AllocateId();
-            const auto zero = ConstantU32(state, 0u);
-            state.module.AddFunction(spv::OpSelect, TypeU32(state), bit, predicate, ConstantU32(state, 1u), zero);
-            if (state.laneHalf == 0) state.module.AddFunction(spv::OpCompositeConstruct, ballotType, ballot, bit, zero, zero, zero);
-            else state.module.AddFunction(spv::OpCompositeConstruct, ballotType, ballot, zero, bit, zero, zero);
-            return ballot;
-        }
-        state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, ballot, ConstantU32(state, spv::ScopeSubgroup), predicate);
-        return EmitConvergentResult(state, ballotType, ballot);
-    }
-
-    std::uint32_t EmitSubgroupShuffle(SpirvEmitterState& state, std::uint32_t type, std::uint32_t value, std::uint32_t lane) {
-        if (state.singleLaneWave) return value;
-        const auto result = state.module.AllocateId();
-        state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, result, ConstantU32(state, spv::ScopeSubgroup), value, lane);
-        return EmitConvergentResult(state, type, result);
-    }
-
-    std::uint32_t EmitSubgroupElect(SpirvEmitterState& state) {
-        if (state.singleLaneWave) return ConstantBool(state, true);
-        const auto elected = state.module.AllocateId();
-        state.module.AddFunction(spv::OpGroupNonUniformElect, TypeBool(state), elected, ConstantU32(state, spv::ScopeSubgroup));
-        return elected;
     }
 
     std::uint32_t EmitWaveBallot(SpirvEmitterState& state, std::uint32_t ballot) {
@@ -225,7 +246,8 @@ namespace ShaderRecompiler
     }
 
     std::uint32_t EmitSubgroupLaneActiveBool(SpirvEmitterState& state, std::uint32_t lane) {
-        const auto activeBallot = EmitSubgroupBallot(state, ConstantBool(state, true));
+        const auto activeBallot = state.module.AllocateId();
+        EmitSubgroupBallot(state, activeBallot, ConstantBool(state, true));
         return EmitBallotLaneActiveBool(state, EmitWaveBallot(state, activeBallot), lane);
     }
 }

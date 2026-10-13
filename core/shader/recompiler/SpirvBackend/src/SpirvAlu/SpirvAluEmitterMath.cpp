@@ -187,8 +187,10 @@ std::uint32_t EmitDsMaskedLaneRead(SpirvEmitterState& state, std::uint32_t sourc
         lane = Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31u));
     }
     const auto physicalLane = EmitHostSubgroupLane(state, lane);
-    const auto shuffled = EmitSubgroupShuffle(state, TypeU32(state), source, physicalLane);
-    const auto sourceExec = EmitSubgroupShuffle(state, TypeBool(state), exec, physicalLane);
+    const auto shuffled = state.module.AllocateId();
+    EmitSubgroupShuffle(state, TypeU32(state), shuffled, source, physicalLane);
+    const auto sourceExec = state.module.AllocateId();
+    EmitSubgroupShuffle(state, TypeBool(state), sourceExec, exec, physicalLane);
     const auto sourceActive = Binary(state, spv::OpLogicalAnd, TypeBool(state), sourceExec, EmitSubgroupLaneActiveBool(state, lane));
     return Select(state, TypeU32(state), sourceActive, shuffled, ConstantU32(state, 0u));
 }
@@ -551,7 +553,7 @@ std::optional<HalfWaveScan> MatchHalfWaveScan(const IrValue* value, IrShaderStag
 
 std::optional<std::uint32_t> EmitHalfWaveReduction(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t lane) {
     auto& state = ctx.state;
-    if (state.singleLaneWave || state.program.WaveSize() != 64u || (lane & 31u) != 31u) return std::nullopt;
+    if (state.program.WaveSize() != 64u || (lane & 31u) != 31u) return std::nullopt;
     const auto stage = state.program.Resources().stage;
     auto scan = MatchHalfWaveScan(inst.Argument(0), stage, false);
     const bool narrow = !scan && HostSubgroupNarrowerThanWave(state) && state.hostSubgroupSize == 32u;
@@ -561,6 +563,7 @@ std::optional<std::uint32_t> EmitHalfWaveReduction(SpirvValueEmitContext& ctx, c
         if (lane < 32u || state.hostSubgroupSize > 32u) return std::nullopt;
         return ConstantU32(state, scan->reduction->identity);
     }
+    if (HostSubgroupSingleLane(state)) return lane >= 32u ? ConstantU32(state, scan->reduction->identity) : ctx.Def(scan->source);
     const auto read = "v_readlane_b32 of lane " + std::to_string(lane) + " of a wave64 half-wave reduction scan";
     const auto& capabilities = state.supportedCapabilities;
     if (std::find(capabilities.begin(), capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityGroupNonUniformArithmetic)) == capabilities.end()) {

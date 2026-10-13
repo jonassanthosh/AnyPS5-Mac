@@ -18,20 +18,6 @@ namespace ShaderRecompiler {
 
 namespace {
 
-std::uint32_t VulkanStageForModel(std::uint32_t model) {
-    switch (model) {
-    case spv::ExecutionModelVertex: return 0x1u;
-    case spv::ExecutionModelTessellationControl: return 0x2u;
-    case spv::ExecutionModelTessellationEvaluation: return 0x4u;
-    case spv::ExecutionModelGeometry: return 0x8u;
-    case spv::ExecutionModelFragment: return 0x10u;
-    case spv::ExecutionModelGLCompute: return 0x20u;
-    case spv::ExecutionModelTaskEXT: return 0x40u;
-    case spv::ExecutionModelMeshEXT: return 0x80u;
-    default: return 0xffffffffu;
-    }
-}
-
 [[noreturn]] void FailProgram(const IrProgram& program, const char* reason) {
     throw std::runtime_error("SPIR-V emission failed: hash=0x" + std::to_string(program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(program.Resources().stage)) + " reason=" + reason);
 }
@@ -129,29 +115,28 @@ std::uint32_t SpirvValueEmitContext::HalfArg(const IrValue& inst, std::size_t in
 }
 
 std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
-    if (otherHalf == nullptr) {
-        return EmitWaveBallot(state, EmitSubgroupBallot(state, Def(predicate)));
-    }
     const auto ballotType = TypeU32Vector(state, 4u);
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();
-    state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, low, scope, half == 0u ? Def(predicate) : otherHalf->Def(predicate));
-    const auto lowBallot = EmitConvergentResult(state, ballotType, low);
+    EmitSubgroupBallot(state, low, otherHalf == nullptr || half == 0u ? Def(predicate) : otherHalf->Def(predicate));
+    if (otherHalf == nullptr) {
+        return EmitWaveBallot(state, low);
+    }
     const auto high = state.module.AllocateId();
     const auto lowWord = state.module.AllocateId();
     const auto highWord = state.module.AllocateId();
     const auto ballot = state.module.AllocateId();
     state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, high, scope, half == 1u ? Def(predicate) : otherHalf->Def(predicate));
-    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), lowWord, lowBallot, 0u);
+    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), lowWord, low, 0u);
     state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), highWord, EmitConvergentResult(state, ballotType, high), 0u);
     state.module.AddFunction(spv::OpCompositeConstruct, ballotType, ballot, lowWord, highWord, ConstantU32(state, 0u), ConstantU32(state, 0u));
     return ballot;
 }
 
 std::uint32_t SpirvValueEmitContext::FirstLane(std::uint32_t ballot) {
-    if (otherHalf == nullptr && !state.singleLaneWave) {
+    if (otherHalf == nullptr) {
         const auto result = state.module.AllocateId();
-        state.module.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup), ballot);
+        EmitSubgroupBallotFindLsb(state, result, ballot);
         return result;
     }
     const auto low = state.module.AllocateId();
@@ -173,17 +158,18 @@ std::uint32_t SpirvValueEmitContext::Shuffle(const IrValue& inst, std::size_t in
     const auto type = TypeId(state, inst.Argument(index)->Type());
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();
-    if (otherHalf == nullptr) return EmitSubgroupShuffle(state, type, Arg(inst, index), EmitHostSubgroupLane(state, lane));
+    if (otherHalf == nullptr) {
+        EmitSubgroupShuffle(state, type, low, Arg(inst, index), EmitHostSubgroupLane(state, lane));
+        return low;
+    }
     const auto physicalLane = EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31u));
     const auto high = state.module.AllocateId();
     const auto inHigh = state.module.AllocateId();
     const auto value = state.module.AllocateId();
     state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope, HalfArg(inst, index, 0u), physicalLane);
     state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, high, scope, HalfArg(inst, index, 1u), physicalLane);
-    const auto lowValue = EmitConvergentResult(state, type, low);
-    const auto highValue = EmitConvergentResult(state, type, high);
     state.module.AddFunction(spv::OpINotEqual, TypeBool(state), inHigh, EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 32u)), ConstantU32(state, 0u));
-    state.module.AddFunction(spv::OpSelect, type, value, inHigh, highValue, lowValue);
+    state.module.AddFunction(spv::OpSelect, type, value, inHigh, EmitConvergentResult(state, type, high), EmitConvergentResult(state, type, low));
     return value;
 }
 
@@ -267,13 +253,12 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     state.registrationModules = target.registrationModules;
     state.fragmentDescriptorSet = target.fragmentDescriptorSet;
     state.hostSubgroupSize = target.subgroupSize;
-    state.singleLaneWave = (target.subgroupStages & VulkanStageForModel(ExecutionModelForStage(program.Resources().stage))) == 0;
-    state.splitSubgroup = !state.singleLaneWave && program.WaveSize() == 32u && target.subgroupSize > 32u;
-    if (state.singleLaneWave) {
+    if (HostSubgroupSingleLane(state)) {
         state.requirements.subgroupBallot = false;
         state.requirements.subgroupShuffle = false;
         state.requirements.subgroupLocalInvocationId = false;
     }
+    state.splitSubgroup = program.WaveSize() == 32u && target.subgroupSize > 32u;
     if (state.splitSubgroup && (state.requirements.subgroupBallot || state.requirements.subgroupShuffle)) state.requirements.subgroupLocalInvocationId = true;
     const auto* workgroup = ShaderWorkgroupInputFor(state);
     state.laneCount = workgroup != nullptr && program.WaveSize() == 64u && workgroup->hostSubgroupSize == 32u ? 2u : 1u;

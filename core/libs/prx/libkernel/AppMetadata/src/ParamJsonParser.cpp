@@ -230,7 +230,10 @@ JsonValue parseJsonNumber(const std::string& text, std::size_t& position) {
     JsonValue value;
     value.type = JsonType::Number;
     value.numberText = text.substr(start, position - start);
-    value.numberValue = std::stod(value.numberText);
+    const auto& number = value.numberText;
+    const auto converted = std::from_chars(number.data(), number.data() + number.size(), value.numberValue);
+    if (converted.ec != std::errc{} || converted.ptr != number.data() + number.size())
+        throw std::runtime_error("number outside supported range in param.json");
     return value;
 }
 
@@ -305,6 +308,12 @@ ParsedParamJson parseParamJson(const std::filesystem::path& paramJsonPath) {
     ParsedParamJson result;
     result.title = title;
     result.titleId = titleId;
+    if (const JsonValue* attribute = findObjectMember(root, "attribute3")) {
+        const auto& number = attribute->numberText;
+        if (attribute->type != JsonType::Number || number.find_first_of("-.eE") != std::string::npos) throw std::runtime_error("param.json attribute3 is not an unsigned integer");
+        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), result.attribute3);
+        if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size()) throw std::runtime_error("param.json attribute3 exceeds uint32 range");
+    }
     if (const JsonValue* downloadData = findObjectMember(root, "downloadDataSize")) {
         if (downloadData->type != JsonType::Number || downloadData->numberValue < 0) throw std::runtime_error("param.json downloadDataSize is not a size");
         if (downloadData->numberText.find_first_of("-.eE") == std::string::npos) {
