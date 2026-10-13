@@ -354,6 +354,16 @@ bool Discovery::RecoverJumpTable(const std::vector<DecodedInstruction>& path, co
             count = ComparedImmediate(candidate) + 1;
             break;
         }
+        if (candidate.instruction.mnemonic == ZYDIS_MNEMONIC_SHR && candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            candidate.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && Enclosing(candidate.operands[0].reg.value) == indexRegister) {
+            const auto width = candidate.operands[0].size;
+            const auto shift = candidate.operands[1].imm.value.u & (width - 1u);
+            if (shift != 0 && width - shift <= 12) {
+                count = std::uint64_t(1) << (width - shift);
+                break;
+            }
+            return false;
+        }
         if (candidate.instruction.mnemonic == ZYDIS_MNEMONIC_BEXTR && candidate.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
             Enclosing(candidate.operands[0].reg.value) == indexRegister) {
             std::optional<std::uint64_t> control;
