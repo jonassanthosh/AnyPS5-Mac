@@ -9,8 +9,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 
@@ -225,6 +227,22 @@ static int RecordWriteAddressFromCounterPair(Apr::CommandBufferObject* buffer, v
 
 static constexpr int ThrdSuccess = 0;
 static constexpr int ThrdError = 4;
+static constexpr int ThrdResourceUnavailable = 6;
+
+struct PadState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool started = false;
+};
+
+struct GuestPad {
+    void* const* vtable;
+    PadState* state;
+    std::uint8_t reserved[16];
+};
+static_assert(sizeof(GuestPad) == 32);
+
+using PadGo = unsigned (APS5_VABI*)(GuestPad*);
 
 static std::atomic_flag sharedPtrSpinLock;
 
@@ -242,10 +260,18 @@ static constexpr std::uint32_t AmmRingIdleFlags = 0x7;
 
 extern "C" {
 int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** value);
+int APS5_VABI pthread_getthreadid_np_nid_postfix(void);
+int APS5_VABI pthread_create_nid_postfix(Pthread* thread, const void* attr, void* (APS5_VABI* entry)(void*), void* arg);
 int APS5_VABI wcsrtombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t** source, std::size_t limit, void* state);
 int APS5_VABI _Cnd_init_nid_postfix(void** handle);
 int SignalCondition_nid_no_patch(void** handle);
 [[noreturn]] void ThrowCppError_nid_no_patch(int code);
+}
+
+static void* APS5_VABI RunPad(void* argument) {
+    auto* pad = static_cast<GuestPad*>(argument);
+    reinterpret_cast<PadGo>(pad->vtable[0])(pad);
+    return nullptr;
 }
 
 extern "C" {
@@ -865,29 +891,33 @@ int APS5_VABI _Thrd_join_nid_postfix(Pthread thread, int* code) {
     return ThrdSuccess;
 }
 
-int APS5_VABI _ZNSt4_Pad8_ReleaseEv_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_Pad8_ReleaseEv_nid_postfix(GuestPad* pad) {
+    auto* state = pad->state;
+    if (state == nullptr) throw std::logic_error("std::_Pad::_Release: the pad was not constructed");
+    std::lock_guard lock(state->mutex);
+    state->started = true;
+    state->changed.notify_all();
 }
 
-int APS5_VABI _ZNSt4_PadC2Ev_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_PadC2Ev_nid_postfix(GuestPad* pad) {
+    pad->state = new PadState();
 }
 
-int APS5_VABI _ZNSt4_PadD2Ev_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_PadD2Ev_nid_postfix(GuestPad* pad) {
+    delete pad->state;
+    pad->state = nullptr;
 }
 
-int APS5_VABI _Thrd_id_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+unsigned APS5_VABI _Thrd_id_nid_postfix(void) {
+    return static_cast<unsigned>(pthread_getthreadid_np_nid_postfix());
 }
 
-int APS5_VABI _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(GuestPad* pad, Pthread* thread) {
+    auto* state = pad->state;
+    if (state == nullptr) throw std::logic_error("std::_Pad::_Launch: the pad was not constructed");
+    if (pthread_create_nid_postfix(thread, nullptr, RunPad, pad) != 0) ThrowCppError_nid_no_patch(ThrdResourceUnavailable);
+    std::unique_lock lock(state->mutex);
+    state->changed.wait(lock, [state] { return state->started; });
 }
 
 int APS5_VABI _ZNSt7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix(void) {
