@@ -930,6 +930,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         create.ppEnabledExtensionNames = instanceExtensions.data();
     }
 #ifdef __APPLE__
+    const std::int32_t metalArgumentBuffers = 1;
+    const VkLayerSettingEXT moltenSetting{"MoltenVK", "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &metalArgumentBuffers};
+    VkLayerSettingsCreateInfoEXT moltenSettings{VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT, nullptr, 1, &moltenSetting};
     {
         std::uint32_t availableCount = 0;
         const auto enumerateExtensions = state->InstanceFunction<PFN_vkEnumerateInstanceExtensionProperties>("vkEnumerateInstanceExtensionProperties");
@@ -939,9 +942,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         if (std::any_of(available.begin(), available.end(), [](const auto& item) { return std::strcmp(item.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; })) {
             instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
             create.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-            create.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
-            create.ppEnabledExtensionNames = instanceExtensions.data();
         }
+        if (std::getenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS") == nullptr &&
+            std::any_of(available.begin(), available.end(), [](const auto& item) { return std::strcmp(item.extensionName, VK_EXT_LAYER_SETTINGS_EXTENSION_NAME) == 0; })) {
+            instanceExtensions.push_back(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
+            moltenSettings.pNext = create.pNext;
+            create.pNext = &moltenSettings;
+        }
+        create.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
+        create.ppEnabledExtensionNames = instanceExtensions.empty() ? nullptr : instanceExtensions.data();
     }
 #endif
     check(state->InstanceFunction<PFN_vkCreateInstance>("vkCreateInstance")(&create, nullptr, &state->instance), "vkCreateInstance");
